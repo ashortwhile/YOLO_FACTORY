@@ -83,6 +83,61 @@ def alert(msg: str, title: str = APP_NAME, kind: str = "info") -> bool:
         return False
 
 
+def native_alert(msg: str, title: str = APP_NAME, timeout_ms: int = 0) -> None:
+    """Win32 MessageBox - works before Tk is loaded and even if Tk is broken.
+    timeout_ms > 0 auto-dismisses, so a stray double-click never leaves a modal stuck.
+    """
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        flags = 0x40 | 0x1000                      # MB_ICONINFORMATION | MB_TOPMOST
+        if timeout_ms:
+            try:
+                user32.MessageBoxTimeoutW(0, str(msg), str(title), flags, 0, timeout_ms)
+                return
+            except Exception:
+                pass
+        user32.MessageBoxW(0, str(msg), str(title), flags)
+    except Exception as exc:
+        log("native alert failed: %r" % exc)
+
+
+def close_splash() -> None:
+    """Close PyInstaller's boot splash (shown while the onefile archive unpacks)."""
+    try:
+        import pyi_splash  # type: ignore
+        pyi_splash.close()
+        log("splash closed")
+    except Exception:
+        pass
+
+
+def single_instance() -> bool:
+    """Prevent five silent processes piling up when the user double-clicks again."""
+    if not IS_WIN:
+        return True
+    try:
+        import ctypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        k.CreateMutexW.restype = ctypes.c_void_p
+        handle = k.CreateMutexW(None, False, "Local\\YOLOStudioSingleInstance")
+        already = ctypes.get_last_error() == 183       # ERROR_ALREADY_EXISTS
+        if not handle or already:
+            native_alert("YOLO 工坊正在启动中。\n\n"
+                         "单文件程序首次解压需要十几秒，请稍等窗口出现，不要重复双击。",
+                         timeout_ms=4000)
+            log("another instance already running -> exit")
+            return False
+        globals()["_INSTANCE_MUTEX"] = handle          # keep alive for process lifetime
+        return True
+    except Exception as exc:
+        log("mutex skipped: %r" % exc)
+        return True
+
+
 def ps(script: str, timeout: int = 45) -> tuple[int, str]:
     """Run PowerShell without flashing a console; -EncodedCommand avoids CJK quoting bugs."""
     cmd = shutil.which("powershell") or "powershell.exe"
@@ -315,36 +370,111 @@ def find_python(root: Path) -> list[str] | None:
     return None
 
 
+def service_port() -> int:
+    try:
+        cfg = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+        return int(cfg.get("port") or 8765)
+    except Exception:
+        return 8765
+
+
+def service_ready(port: int) -> bool:
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.15)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def show_startup_progress(proc, startup: Path, port: int) -> None:
+    """Visible feedback while bootstrap configures the environment (can take minutes)."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception as exc:
+        log("progress window unavailable: %r" % exc)
+        return
+    close_splash()
+    try:
+        root = tk.Tk()
+        root.title("YOLO 工坊 · 正在启动")
+        root.geometry("600x330")
+        root.resizable(False, False)
+        root.configure(bg="#f7f9fc")
+        tk.Label(root, text="正在配置运行环境", font=("Microsoft YaHei", 16, "bold"),
+                 fg="#0f172a", bg="#f7f9fc").pack(anchor="w", padx=22, pady=(18, 2))
+        tk.Label(root, text="首次启动会按显卡下载对应依赖，可能持续几分钟，请保持网络畅通。",
+                 font=("Microsoft YaHei", 9), fg="#64748b",
+                 bg="#f7f9fc").pack(anchor="w", padx=22)
+        bar = ttk.Progressbar(root, mode="indeterminate", length=556)
+        bar.pack(padx=22, pady=(12, 8))
+        bar.start(12)
+        text = tk.Text(root, height=10, bg="#ffffff", fg="#334155", relief="flat",
+                       font=("Consolas", 9), wrap="word")
+        text.pack(fill="both", expand=True, padx=22, pady=(0, 18))
+        text.insert("1.0", "准备中…\n")
+
+        def poll():
+            content = ""
+            try:
+                content = startup.read_text(encoding="utf-8", errors="replace")
+                lines = content.splitlines()[-12:]
+                text.delete("1.0", "end")
+                text.insert("1.0", "\n".join(lines) + "\n")
+                text.see("end")
+            except Exception:
+                pass
+            # bootstrap logs "URL: http://..." right before the app window opens
+            ready = ("URL: http://" in content or "Service already running" in content
+                     or service_ready(port))
+            if proc.poll() is not None or ready:
+                root.destroy()
+                return
+            root.after(600, poll)
+
+        log("progress window shown")
+        root.after(400, poll)
+        root.mainloop()
+        log("progress window closed")
+    except Exception as exc:
+        log("progress window failed: %r" % exc)
+
+
 def launch() -> int:
     """Software mode: delegate to bootstrap.py which sets up the environment."""
     py = find_python(HERE)
     if not py:
-        alert("没有找到 Python。请先安装 Python 3.9~3.12 再启动本软件，"
-              "或从开始菜单重新安装。", kind="error")
+        native_alert("没有找到 Python。请先安装 Python 3.9~3.12 再启动本软件，"
+                     "或从开始菜单重新安装。")
         return 1
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    env.pop("PYTHONPATH", None)          # avoid injected sitecustomize hooks
     logs = HERE / "logs"
     logs.mkdir(exist_ok=True)
     startup = logs / "startup.log"
     log("launch: %s bootstrap.py" % " ".join(py))
     try:
-        with startup.open("w", encoding="utf-8", errors="replace") as fh:
-            proc = subprocess.Popen(
-                py + [str(HERE / "bootstrap.py")], cwd=str(HERE),
-                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                env=env, creationflags=NO_WINDOW)
-            code = proc.wait()
+        fh = startup.open("w", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(
+            py + [str(HERE / "bootstrap.py")], cwd=str(HERE),
+            stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            env=env, creationflags=NO_WINDOW)
+        show_startup_progress(proc, startup, service_port())
+        code = proc.wait()
+        try:
+            fh.close()
+        except Exception:
+            pass
         if code:
             tail = "\n".join(startup.read_text(encoding="utf-8", errors="replace")
                              .splitlines()[-25:])
-            alert("启动失败（退出码 %s）。\n\n%s\n\n完整日志：%s" % (code, tail, startup),
-                  kind="error")
+            native_alert("启动失败（退出码 %s）。\n\n%s\n\n完整日志：%s"
+                         % (code, tail, startup))
         return code
     except Exception as exc:
         log("launch failed: %r" % exc)
-        alert("启动失败：%s" % exc, kind="error")
+        native_alert("启动失败：%s" % exc)
         return 1
 
 
@@ -355,18 +485,20 @@ def finish_uninstall(inst: Path, keep_data: bool, silent: bool) -> int:
     if info_file and info_file.is_file():
         try:
             info = json.loads(info_file.read_text(encoding="utf-8"))
-            for lnk in info.get("shortcuts", []):
+            shortcuts = info.get("shortcuts") or []
+            for lnk in shortcuts:
                 try:
                     Path(lnk).unlink(missing_ok=True)
                     log("removed shortcut %s" % lnk)
                 except Exception as exc:
                     log("shortcut remove failed %r" % exc)
-            folder = Path(info.get("shortcuts", [None])[-1] or "").parent
-            if folder and folder.is_dir():
-                try:
-                    folder.rmdir()
-                except Exception:
-                    pass
+            if shortcuts:
+                folder = Path(shortcuts[-1]).parent
+                if folder.is_dir():
+                    try:
+                        folder.rmdir()
+                    except Exception:
+                        pass
         except Exception as exc:
             log("info read failed %r" % exc)
     reg_delete()
@@ -437,8 +569,10 @@ def uninstall(opts: dict, argv: list[str]) -> int:
 
 # --------------------------------------------------------------------------- GUI wizard
 def gui_install() -> int:
+    log("gui: importing tkinter")
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
+    log("gui: tkinter imported, creating Tk root")
 
     BG = "#f7f9fc"
     BLUE = "#2563eb"
@@ -448,7 +582,14 @@ def gui_install() -> int:
     FB = ("Microsoft YaHei", 10, "bold")
     FT = ("Microsoft YaHei", 20, "bold")
 
+    close_splash()                 # Tcl/Tk conflict: splash must die before Tk root
     root = tk.Tk()
+    log("gui: Tk root created")
+    try:
+        import faulthandler
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:
+        pass
     root.title("%s 安装程序" % APP_NAME)
     root.geometry("640x450")
     root.resizable(False, False)
@@ -614,14 +755,21 @@ def main() -> int:
     log("argv=%r self=%s bundle=%s" % (argv, SELF, BUNDLE))
 
     if opts["uninstall"]:
+        close_splash()
         return uninstall(opts, argv)
+
+    if not single_instance():
+        close_splash()
+        return 0
 
     installed_here = ((HERE / "bootstrap.py").is_file()
                       and (HERE / "web" / "index.html").is_file())
     if installed_here and not opts["install"]:
+        close_splash()
         return launch()                       # software mode
 
     if opts["silent"] or opts["install"]:
+        close_splash()
         target = Path(opts["dir"]) if opts["dir"] else default_dir()
         try:
             info = install(target, not opts["no_shortcuts"])
@@ -634,7 +782,25 @@ def main() -> int:
             log("silent install failed: %r" % exc)
             return 1
 
+    # A windowed EXE has no console: if the GUI ever hangs, dump the Python
+    # stack so the failure is diagnosable instead of looking like "nothing happened".
+    start_watchdog()
+    log("main: entering GUI wizard")
     return gui_install()
+
+
+_WATCHDOG_FILE = None
+
+
+def start_watchdog(seconds: int = 8) -> None:
+    global _WATCHDOG_FILE
+    try:
+        import faulthandler
+        _WATCHDOG_FILE = (Path(tempfile.gettempdir()) / "YOLOStudio_stack.log").open(
+            "w", encoding="utf-8", errors="replace")
+        faulthandler.dump_traceback_later(seconds, file=_WATCHDOG_FILE, exit=False)
+    except Exception as exc:
+        log("watchdog unavailable: %r" % exc)
 
 
 if __name__ == "__main__":
@@ -642,6 +808,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as exc:                # windowed build has no console
         log("FATAL %r" % exc)
-        alert("发生错误：%s\n\n日志：%s" %
-              (exc, Path(tempfile.gettempdir()) / "YOLOStudio_setup.log"), kind="error")
+        native_alert("发生错误：%s\n\n日志：%s" %
+                     (exc, Path(tempfile.gettempdir()) / "YOLOStudio_setup.log"),
+                     timeout_ms=0)
         sys.exit(1)

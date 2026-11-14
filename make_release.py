@@ -14,9 +14,9 @@ OUT = ROOT.parent / "YOLO工坊-绿色版.zip"
 TOP = "YOLOStudio"
 SKIP_DIRS = {".venv", "logs", "__pycache__", "dist", "build", ".git", ".idea",
              ".appprofile", "workspace"}
-SKIP_FILES = {"config.json", "app.ico", "make_release.py", "build_exe.py",
-              "build_setup.py", "installer.py", "打包分发.bat", "打包EXE.bat",
-              "打包安装版.bat"}
+SKIP_FILES = {"config.json", "app.ico", "splash.png", "make_release.py",
+              "build_exe.py", "build_setup.py", "installer.py",
+              "打包分发.bat", "打包EXE.bat", "打包安装版.bat"}
 EMPTY_DIRS = ["workspace/datasets", "workspace/models", "workspace/exports",
               "workspace/runs", "logs"]
 

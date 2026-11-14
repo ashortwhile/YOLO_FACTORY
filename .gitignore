@@ -17,6 +17,7 @@ build/
 dist/
 payload.zip
 app.ico
+splash.png
 *.spec
 *.exe
 *.zip
