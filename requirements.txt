@@ -1,0 +1,6 @@
+# YOLO Studio runtime dependencies (torch is installed separately per GPU vendor)
+# >= 8.4.111 is required for Intel XPU / AMD ROCm device handling.
+ultralytics>=8.4.111
+pillow>=10.0
+pyyaml>=6.0
+numpy>=1.24

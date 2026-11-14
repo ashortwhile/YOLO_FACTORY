@@ -1,0 +1,28 @@
+# ---- local runtime (created on first launch, several GB) ----
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+logs/
+
+# ---- machine-specific config / install record ----
+config.json
+安装信息.json
+
+# ---- user data: datasets, models, weights, training runs ----
+workspace/
+
+# ---- build artifacts and release binaries ----
+build/
+dist/
+payload.zip
+app.ico
+*.spec
+*.exe
+*.zip
+
+# ---- editor / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLO 工坊 - 训练一体式软件</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">Y</span><div><b>YOLO 工坊</b><small>标注 · 训练 · 推理 一体式</small></div></div>
+  <div class="top-right">
+    <span id="hwBadge" class="badge badge-muted">检测硬件中...</span>
+    <span id="taskBadge" class="badge badge-muted">空闲</span>
+    <button class="btn btn-ghost" id="btnHelpTop" title="使用说明">帮助</button>
+    <button class="btn btn-ghost" id="btnQuit" title="关闭服务并退出">退出软件</button>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="sidebar">
+  <div class="nav-group-title">工作流</div>
+  <a class="nav-item active" data-view="home"><i class="ico">▦</i>概览</a>
+  <a class="nav-item" data-view="datasets"><i class="ico">▤</i>数据集</a>
+  <a class="nav-item" data-view="label"><i class="ico">▣</i>打标签</a>
+  <a class="nav-item" data-view="train"><i class="ico">▶</i>训练</a>
+  <a class="nav-item" data-view="predict"><i class="ico">◎</i>推理验证</a>
+  <a class="nav-item" data-view="runs"><i class="ico">▥</i>训练结果</a>
+  <div class="nav-group-title">系统</div>
+  <a class="nav-item" data-view="env"><i class="ico">⚙</i>环境与显卡</a>
+  <a class="nav-item" data-view="help"><i class="ico">?</i>使用说明</a>
+  <div class="side-foot"><span id="sideVersion">v1.0</span><br>本地运行 · 数据不出机器</div>
+</nav>
+
+<main class="main">
+
+<!-- ============ 概览 ============ -->
+<section class="view active" id="view-home">
+  <div class="page-head"><div><h1>概览</h1><p class="sub">从图片到可用模型，一条流水线搞定</p></div>
+    <button class="btn" id="btnRefreshHome">刷新</button></div>
+  <div class="hero">
+    <div class="hero-copy">
+      <div class="hero-kicker">LOCAL · OFFLINE · ALL-IN-ONE</div>
+      <h2>从图片到模型，一个软件走完全程</h2>
+      <p>自动配置环境 · 人工打标签 · 多厂商显卡自适应 · 实时训练曲线</p>
+      <div class="hero-actions">
+        <button class="btn btn-hero" data-go="label">开始标注</button>
+        <button class="btn btn-hero ghost" data-go="env">检查显卡环境</button>
+      </div>
+    </div>
+    <svg class="hero-art" viewBox="0 0 280 160" aria-hidden="true">
+      <defs><linearGradient id="hg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#dbeafe"/><stop offset="1" stop-color="#e0f2fe"/></linearGradient></defs>
+      <rect x="18" y="14" width="244" height="132" rx="14" fill="url(#hg)"/>
+      <rect x="34" y="30" width="212" height="100" rx="8" fill="#ffffff" opacity=".78"/>
+      <circle cx="72" cy="60" r="12" fill="#93c5fd" opacity=".8"/>
+      <rect x="102" y="46" width="66" height="34" rx="5" fill="#bfdbfe" opacity=".85"/>
+      <rect x="176" y="86" width="46" height="30" rx="5" fill="#a7f3d0" opacity=".85"/>
+      <rect x="54" y="92" width="42" height="26" rx="4" fill="#fde68a" opacity=".9"/>
+      <rect x="96" y="40" width="78" height="46" rx="3" fill="none" stroke="#2563eb" stroke-width="2.4"/>
+      <rect x="96" y="28" width="42" height="13" rx="3" fill="#2563eb"/>
+      <rect x="168" y="80" width="62" height="42" rx="3" fill="none" stroke="#0d9488" stroke-width="2.4" stroke-dasharray="6 4"/>
+      <rect x="168" y="68" width="38" height="13" rx="3" fill="#0d9488"/>
+      <path d="M18 120 L262 120" stroke="#93c5fd" stroke-width="1" opacity=".5"/>
+    </svg>
+  </div>
+  <div class="stat-grid" id="homeStats"></div>
+  <div class="row-2">
+    <div class="card"><h3>硬件与加速</h3><div id="homeHardware" class="kv-list">加载中...</div></div>
+    <div class="card"><h3>快速开始</h3>
+      <ol class="steps">
+        <li><b>数据集</b>：新建或挂载已有 YOLO 目录，确认类别名称</li>
+        <li><b>打标签</b>：人工拖拽画框；也可以用已有模型先预标注再改</li>
+        <li><b>训练</b>：选模型与显卡，边训边看 mAP 曲线</li>
+        <li><b>推理 / 导出</b>：验证效果，导出 ONNX / OpenVINO</li>
+      </ol>
+      <div class="btn-row"><button class="btn btn-primary" data-go="datasets">管理数据集</button>
+      <button class="btn" data-go="label">开始标注</button><button class="btn" data-go="train">去训练</button></div>
+    </div>
+  </div>
+  <div class="card"><h3>最近训练</h3><div id="homeRuns"></div></div>
+</section>
+
+<!-- ============ 数据集 ============ -->
+<section class="view" id="view-datasets">
+  <div class="page-head"><div><h1>数据集</h1><p class="sub">YOLO 目录结构：images/train · images/val · labels/train · labels/val</p></div>
+    <button class="btn" id="btnRefreshDs">刷新</button></div>
+  <div class="row-2 ds-layout">
+    <div class="card"><h3>数据集列表</h3><div id="dsList" class="ds-list"></div>
+      <div class="divider"></div><h4>新建数据集</h4>
+      <label>名称<input id="newDsName" placeholder="例如 my_detection"></label>
+      <label>类别（每行一个，或逗号分隔）<textarea id="newDsClasses" rows="3" placeholder="person&#10;car&#10;dog"></textarea></label>
+      <label>图片源目录（可选，留空则稍后手动放图）<input id="newDsSrc" placeholder="C:\images\raw"></label>
+      <label>验证集比例<input id="newDsRatio" type="number" value="0.2" min="0" max="0.9" step="0.05"></label>
+      <button class="btn btn-primary" id="btnCreateDs">创建并导入</button>
+      <div class="divider"></div><h4>挂载已有 YOLO 目录</h4>
+      <label>目录路径<input id="attachRoot" placeholder="C:\datasets\my_yolo_data"></label>
+      <label>显示名称（可选）<input id="attachName" placeholder="my_dataset"></label>
+      <div class="btn-row"><button class="btn" id="btnAttachDs">挂载</button>
+        <button class="btn btn-sm" id="btnDiscover">扫描软件同级目录</button></div>
+      <div class="hint small">扫描只登记路径，不会复制或修改你的文件；软件默认不会自动挂载任何已有数据。</div>
+    </div>
+    <div class="card"><h3>数据集详情</h3><div id="dsDetail" class="hint">从左侧选择一个数据集</div></div>
+  </div>
+</section>
+
+<!-- ============ 标注 ============ -->
+<section class="view" id="view-label">
+  <div class="page-head"><div><h1>打标签</h1><p class="sub">人工画框为主，AI 预标注只负责起草，最终由你确认</p></div>
+    <div class="inline-form">
+      <select id="lbDataset" class="sel-sm"></select>
+      <select id="lbSplit" class="sel-sm"><option value="train">train</option><option value="val">val</option></select>
+      <select id="lbFilter" class="sel-sm"><option value="all">全部</option><option value="unlabeled">未标注</option><option value="labeled">已标注</option></select>
+    </div></div>
+  <div class="toolbar">
+    <button class="btn btn-sm" id="lbPrev">◀ 上一张 (A)</button>
+    <span class="counter" id="lbCounter">0 / 0</span>
+    <button class="btn btn-sm" id="lbNext">下一张 (D) ▶</button>
+    <span class="sep"></span>
+    <button class="btn btn-sm btn-primary" id="lbSave">保存 (Ctrl+S)</button>
+    <button class="btn btn-sm" id="lbAutoLabel">AI 预标注</button>
+    <button class="btn btn-sm" id="lbClear">清空当前框</button>
+    <label class="switch"><input type="checkbox" id="lbAutoSave" checked> 切换自动保存</label>
+    <span class="sep"></span>
+    <span class="hint" id="lbStatus">加载中...</span>
+  </div>
+  <div class="label-layout">
+    <aside class="card label-files"><h4>图片 <span id="lbFileCount"></span></h4>
+      <input id="lbSearch" class="search" placeholder="搜索文件名">
+      <div id="lbFileList" class="file-list"></div></aside>
+    <div class="card canvas-card">
+      <div class="canvas-wrap" id="canvasWrap"><canvas id="labelCanvas"></canvas></div>
+      <div class="canvas-foot"><span id="lbImgInfo">未加载图片</span>
+        <span class="hint">拖拽画框 · 点框选中 · 拖框移动 · 拖右下角缩放 · Delete 删除 · 1-9 切类别</span></div>
+    </div>
+    <aside class="card label-side">
+      <h4>类别</h4><div id="lbClassList" class="class-list"></div>
+      <div class="hint small">当前绘制类别：<b id="lbActiveClass">-</b></div>
+      <div class="divider"></div>
+      <h4>标注框 <span id="lbBoxCount">0</span></h4><div id="lbBoxList" class="box-list"></div>
+      <div class="divider"></div>
+      <h4>统计</h4><div id="lbStats" class="kv-list small"></div>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 训练 ============ -->
+<section class="view" id="view-train">
+  <div class="page-head"><div><h1>训练</h1><p class="sub">实时日志 + mAP 曲线，随时可停止或续训</p></div>
+    <button class="btn" id="btnRefreshTrain">刷新状态</button></div>
+  <div class="row-2 train-layout">
+    <div class="card"><h3>训练配置</h3>
+      <label>预训练模型<select id="trModel"></select></label>
+      <div class="hint small" id="trModelHint"></div>
+      <label>或自定义权重路径<input id="trCustomModel" placeholder="留空则使用上方选择"></label>
+      <label>数据集<select id="trDataset"></select></label>
+      <div class="grid-2">
+        <label>Epochs<input id="trEpochs" type="number" value="50" min="1"></label>
+        <label>图片尺寸 imgsz<input id="trImgsz" type="number" value="640" step="32" min="32"></label>
+        <label>Batch<input id="trBatch" type="number" value="1" min="1"></label>
+        <label>Workers<input id="trWorkers" type="number" value="2" min="0"></label>
+        <label>Patience<input id="trPatience" type="number" value="50" min="0"></label>
+        <label>名称<input id="trName" value="train"></label>
+      </div>
+      <label>计算设备<select id="trDevice"></select></label>
+      <div class="hint small" id="trDeviceHint"></div>
+      <details class="adv"><summary>高级参数</summary>
+        <div class="grid-2">
+          <label>优化器<select id="trOptimizer"><option>auto</option><option>SGD</option><option>Adam</option><option>AdamW</option><option>NAdam</option><option>RAdam</option><option>RMSProp</option></select></label>
+          <label>初始学习率 lr0<input id="trLr0" type="number" step="0.0001" placeholder="自动"></label>
+        </div>
+        <label class="checkbox"><input type="checkbox" id="trResume"> 从最近一次 last.pt 断点续训</label>
+        <label class="checkbox"><input type="checkbox" id="trAmp"> 混合精度 AMP（CPU / XPU 建议关闭）</label>
+        <label class="checkbox"><input type="checkbox" id="trCache"> 缓存图片到内存（小数据集可加速）</label>
+      </details>
+      <div class="btn-row"><button class="btn btn-primary" id="btnStartTrain">开始训练</button>
+        <button class="btn btn-danger" id="btnStopTrain" disabled>停止</button></div>
+      <div class="notice" id="trNotice"></div>
+    </div>
+    <div class="card"><h3>运行状态 <span id="trTaskState" class="badge badge-muted">空闲</span></h3>
+      <div class="progress"><div id="trProgress"></div></div>
+      <div class="metric-row" id="trMetrics"></div>
+      <div class="chart-box" id="trChart"></div>
+      <h4>日志</h4><pre class="logbox" id="trLog">等待训练启动...</pre>
+      <div class="btn-row"><button class="btn btn-sm" id="btnOpenRuns">打开输出目录</button>
+        <button class="btn btn-sm" data-go="runs">查看结果</button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 推理 ============ -->
+<section class="view" id="view-predict">
+  <div class="page-head"><div><h1>推理验证</h1><p class="sub">用训练好的权重检测图片，或验证整体验证集指标</p></div></div>
+  <div class="row-2 predict-layout">
+    <div class="card"><h3>参数</h3>
+      <label>模型权重<select id="prModel"></select></label>
+      <label>数据集<select id="prDataset"></select></label>
+      <div class="grid-2"><label>划分<select id="prSplit"><option value="train">train</option><option value="val">val</option></select></label>
+      <label>图片<select id="prImage"></select></label></div>
+      <div class="grid-2"><label>置信度<input id="prConf" type="number" value="0.25" min="0.01" max="0.99" step="0.05"></label>
+      <label>设备<select id="prDevice"></select></label></div>
+      <div class="btn-row"><button class="btn btn-primary" id="btnPredict">检测这张图</button>
+        <button class="btn" id="btnValidate">验证 mAP</button>
+        <button class="btn" id="btnExport">导出 ONNX</button></div>
+      <div class="hint small">Intel 显卡建议导出 OpenVINO 格式以获得更好推理性能。</div>
+      <div class="notice" id="prNotice"></div>
+      <div class="divider"></div><h4>输出</h4><pre class="logbox small" id="prLog">等待操作...</pre>
+    </div>
+    <div class="card"><h3>检测结果 <span id="prCount" class="badge badge-muted">0</span></h3>
+      <div class="canvas-wrap predict-wrap"><canvas id="predictCanvas"></canvas></div>
+      <div id="prBoxList" class="box-list"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 结果 ============ -->
+<section class="view" id="view-runs">
+  <div class="page-head"><div><h1>训练结果</h1><p class="sub">历史训练曲线、权重与参数</p></div>
+    <button class="btn" id="btnRefreshRuns">刷新</button></div>
+  <div class="row-2 runs-layout">
+    <div class="card"><h3>训练记录</h3><div id="runsList" class="ds-list"></div></div>
+    <div class="card"><h3>详情</h3><div id="runDetail" class="hint">选择左侧一次训练</div></div>
+  </div>
+</section>
+
+<!-- ============ 环境 ============ -->
+<section class="view" id="view-env">
+  <div class="page-head"><div><h1>环境与显卡</h1><p class="sub">首次启动自动识别 NVIDIA / AMD / Intel 显卡，并安装匹配的最新版 PyTorch 与 Ultralytics</p></div>
+    <button class="btn" id="btnRefreshHw">重新检测硬件</button></div>
+  <div class="row-2">
+    <div class="card"><h3>硬件检测 <span id="hwReadyBadge" class="badge badge-muted">-</span></h3>
+      <div id="hwDetail" class="kv-list">检测中...</div>
+      <div class="divider"></div><h3>切换加速后端</h3>
+      <p class="hint small">首次启动已按检测到的显卡自动装好对应后端，这里仅用于手动切换或回退。</p>
+      <div class="hint small" id="hwNote"></div>
+      <label>目标后端<select id="hwBackend"></select></label>
+      <div class="btn-row"><button class="btn btn-primary" id="btnSwitchBackend">一键启用加速</button>
+        <button class="btn" id="btnBackToCpu">恢复 CPU 版</button></div>
+      <div class="warn" id="hwWarn"></div>
+      <pre class="logbox small" id="hwLog">等待操作...</pre>
+    </div>
+    <div class="card"><h3>运行时</h3><div id="envRuntime" class="kv-list"></div>
+      <div class="divider"></div><h3>模型管理</h3>
+      <div id="modelList" class="model-list"></div>
+      <div class="btn-row"><button class="btn btn-sm" id="btnOpenModels">打开模型目录</button>
+        <button class="btn btn-sm" id="btnImportModel">导入本地权重</button>
+        <button class="btn btn-sm" id="btnCustomUrl">自定义下载地址</button></div>
+      <div class="divider"></div><h3>设置</h3>
+      <label>pip 镜像<select id="cfgMirror"><option value="tsinghua">清华大学</option><option value="aliyun">阿里云</option><option value="pypi">官方 PyPI</option></select></label>
+      <label>默认模型<select id="cfgModel"></select></label>
+      <label class="checkbox"><input type="checkbox" id="cfgAppMode"> 以独立应用窗口启动</label>
+      <button class="btn btn-sm" id="btnSaveCfg">保存设置</button>
+      <div class="divider"></div><h3>后台任务</h3><div id="taskList" class="task-list"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 帮助 ============ -->
+<section class="view" id="view-help">
+  <div class="page-head"><div><h1>使用说明</h1><p class="sub">离线可用，所有数据都保存在本机</p></div></div>
+  <div class="row-2">
+    <div class="card"><h3>第一次使用</h3>
+      <ol class="steps"><li>双击 <b>YOLO工坊-安装版.exe</b> 完成安装，再点桌面图标启动；首次运行会自动探测显卡、创建独立虚拟环境，并下载匹配的最新版 PyTorch / Ultralytics 与默认权重（需联网，几分钟）。</li>
+      <li>安装版启动后直接弹出独立应用窗口；绿色版请保持黑色控制台窗口开着，它是本地服务。</li>
+      <li>「数据集」页新建数据集，或挂载 / 扫描已有的 YOLO 目录（软件默认不预置任何数据）。</li>
+      <li>「打标签」页人工画框；点「AI 预标注」可用已有权重起草，再人工修正。</li>
+      <li>「训练」页选模型与设备，开始后实时显示日志和曲线。</li></ol>
+      <h3>标注快捷键</h3>
+      <table class="table"><tr><td>A / D 或 ← / →</td><td>上一张 / 下一张（有选中框时方向键微调位置）</td></tr>
+      <tr><td>鼠标拖拽</td><td>画新框</td></tr><tr><td>点击框 / 拖动</td><td>选中 / 移动</td></tr>
+      <tr><td>拖右下角</td><td>缩放框</td></tr><tr><td>1 - 9</td><td>切换当前类别 / 改选中框类别</td></tr>
+      <tr><td>Delete / Backspace</td><td>删除选中框</td></tr><tr><td>Ctrl + S</td><td>保存</td></tr>
+      <tr><td>Esc</td><td>取消选择</td></tr></table>
+    </div>
+    <div class="card"><h3>显卡适配说明</h3>
+      <table class="table"><tr><th>厂商</th><th>后端 / device</th><th>说明</th></tr>
+      <tr><td>NVIDIA</td><td>CUDA / 0</td><td>按驱动 CUDA 版本自动选 cu128 / cu130 / cu132 轮子</td></tr>
+      <tr><td>Intel Arc / 核显</td><td>XPU / xpu:0</td><td>自动装 XPU 版 torch 与最新版 Ultralytics</td></tr>
+      <tr><td>AMD Radeon</td><td>ROCm / 0</td><td>Windows 无官方 ROCm 轮子；装好 HIP SDK 后本软件自动识别，否则建议 WSL2/Linux</td></tr>
+      <tr><td>Apple</td><td>MPS / mps</td><td>macOS 自动识别</td></tr>
+      <tr><td>任意 DX12 显卡</td><td>DirectML</td><td>实验性，主要用于推理</td></tr>
+      <tr><td>无独显 / 安装失败</td><td>CPU</td><td>自动回退，保证软件始终可用</td></tr></table>
+      <h3>常见问题</h3>
+      <p class="hint"><b>Q：显存容量显示不准？</b><br>Windows 的 WMI 显存字段是 32 位，大显存显卡容易显示错误；本软件改读注册表的 64 位数值，显示真实容量。</p>
+      <p class="hint"><b>Q：训练时报字体下载错误？</b><br>软件已默认关闭字体下载与绘图（plots=False），不会触发该问题。</p>
+      <p class="hint"><b>Q：首次启动没装上显卡后端？</b><br>多为离线或下载源不可达；联网后重新启动会自动补齐，也可在「环境与显卡」页手动切换，失败会自动回退 CPU。</p>
+      <p class="hint"><b>Q：只能跑 CPU？</b><br>纯 CPU 时建议 yolo26n + batch 1 + imgsz 512；YOLO26n 针对 CPU 推理做了优化。</p>
+      <p class="hint"><b>Q：预标注类别不对？</b><br>COCO 预训练权重只有 80 个通用类别，与自定义类别不匹配；软件会把它当作「候选框」，统一设为指定类别，请人工改。用自己训好的权重预标注才带正确类别。</p>
+      <p class="hint"><b>Q：模型下载失败？</b><br>软件会先走国内可访问的镜像源，再回退官方源。仍失败时可用「导入本地权重」或「自定义下载地址」，也可以直接把 .pt 放进 workspace/models；或者直接选 yolo26.yaml 从零训练，完全不需要权重文件。</p>
+    </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<div id="toast" class="toast"></div>
+<div id="modal" class="modal hidden"><div class="modal-box"><h3 id="modalTitle">提示</h3>
+  <div id="modalBody"></div><div class="btn-row right"><button class="btn" id="modalCancel">取消</button>
+  <button class="btn btn-primary" id="modalOk">确定</button></div></div></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
