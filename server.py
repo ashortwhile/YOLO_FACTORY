@@ -392,6 +392,37 @@ def action_dataset_import(b: dict) -> dict:
     return {"name": d["name"], "imported": imported, "info": dataset_info(d)}
 
 
+def action_pick_folder(b: dict) -> dict:
+    """Open a NATIVE Explorer folder-picker dialog. The server runs on the
+    same machine as the browser, so it can show the real Windows dialog and
+    return the chosen path - no typing required."""
+    result: dict = {}
+
+    def ask() -> None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            path = filedialog.askdirectory(title="选择图片文件夹")
+            root.destroy()
+            result["path"] = path or ""
+        except Exception as exc:
+            result["error"] = f"无法打开文件夹选择窗口：{exc}"
+
+    t = threading.Thread(target=ask, daemon=True)
+    t.start()
+    t.join(timeout=600)
+    if t.is_alive():
+        raise ValueError("文件夹选择超时（10 分钟未选择）")
+    if result.get("error"):
+        raise ValueError(result["error"])
+    if not result.get("path"):
+        return {"path": "", "canceled": True}
+    return {"path": result["path"]}
+
+
 def action_dataset_attach(b: dict) -> dict:
     root = Path(str(b.get("root", "")).strip())
     if not root.is_dir():
@@ -724,6 +755,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(action_dataset_split(b))
             if path == "/api/dataset/import":
                 return self._json(action_dataset_import(b))
+            if path == "/api/pick_folder":
+                return self._json(action_pick_folder(b))
             if path == "/api/dataset/discover":
                 return self._json(action_discover(b))
             if path == "/api/model/import":

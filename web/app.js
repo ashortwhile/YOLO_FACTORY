@@ -263,7 +263,7 @@ async function renderDatasets() {
       <div class="btn-row"><button class="btn btn-primary btn-sm" id="btnSaveClasses">保存类别</button>
         <button class="btn btn-sm" id="btnOpenDs">打开目录</button></div>
       <div class="divider"></div><h4>导入图片（自动划分 train / val）</h4>
-      <label>图片文件夹路径（粘贴的带引号路径也可以）<input id="dsImportSrc" placeholder="例如 D:\\photos\\raw"></label>
+      <label>图片文件夹（点「浏览」弹出文件管理器选择）<div class="input-row"><input id="dsImportSrc" placeholder="也可直接粘贴路径"><button class="btn btn-sm" id="btnBrowseImport" type="button">浏览…</button></div></label>
       <label>验证集比例<input id="dsImportRatio" type="number" value="0.2" min="0" max="0.9" step="0.05"></label>
       <div class="btn-row"><button class="btn btn-primary btn-sm" id="btnImportImgs">导入整个文件夹</button></div>
       <div class="divider"></div><h4>重新划分 train / val</h4>
@@ -278,6 +278,20 @@ async function renderDatasets() {
       catch (e) { toast(e.message, true); }
     };
     $('btnOpenDs').onclick = () => api('/api/open', { path: d.root }).catch(e => toast(e.message, true));
+    $('btnBrowseImport').onclick = async () => {
+      toast('已弹出文件夹选择窗口，请在屏幕上选择图片文件夹…');
+      try {
+        const picked = await api('/api/pick_folder', {});
+        if (picked.canceled || !picked.path) return toast('已取消选择');
+        $('dsImportSrc').value = picked.path;
+        const r = await api('/api/dataset/import', {
+          name: d.name, src_dir: picked.path,
+          val_ratio: parseFloat($('dsImportRatio').value)
+        });
+        toast(`已从所选文件夹导入 ${r.imported} 张图片，自动划分 train / val`);
+        renderDatasets();
+      } catch (e) { toast(e.message, true); }
+    };
     $('btnImportImgs').onclick = async () => {
       try {
         const r = await api('/api/dataset/import', {
@@ -298,6 +312,15 @@ async function renderDatasets() {
   } catch (e) { toast(e.message, true); }
 }
 $('btnRefreshDs').onclick = renderDatasets;
+$('btnBrowseNewSrc').onclick = async () => {
+  toast('已弹出文件夹选择窗口，请在屏幕上选择图片文件夹…');
+  try {
+    const picked = await api('/api/pick_folder', {});
+    if (picked.canceled || !picked.path) return toast('已取消选择');
+    $('newDsSrc').value = picked.path;
+    toast('已选择：' + picked.path + '（点击「创建并导入」完成）');
+  } catch (e) { toast(e.message, true); }
+};
 $('btnCreateDs').onclick = async () => {
   const name = $('newDsName').value.trim();
   const classes = $('newDsClasses').value.split(/[\n,]/).map(x => x.trim()).filter(Boolean);

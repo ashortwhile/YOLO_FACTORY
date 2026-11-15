@@ -90,7 +90,7 @@
       <div class="divider"></div><h4>新建数据集</h4>
       <label>名称<input id="newDsName" placeholder="例如 my_detection"></label>
       <label>类别（每行一个，或逗号分隔）<textarea id="newDsClasses" rows="3" placeholder="person&#10;car&#10;dog"></textarea></label>
-      <label>图片源目录（可选，留空则稍后手动放图）<input id="newDsSrc" placeholder="C:\images\raw"></label>
+      <label>图片源目录（点「浏览」用文件管理器选文件夹）<div class="input-row"><input id="newDsSrc" placeholder="也可直接粘贴路径"><button class="btn btn-sm" id="btnBrowseNewSrc" type="button">浏览…</button></div></label>
       <label>验证集比例<input id="newDsRatio" type="number" value="0.2" min="0" max="0.9" step="0.05"></label>
       <button class="btn btn-primary" id="btnCreateDs">创建并导入</button>
       <div class="divider"></div><h4>挂载已有 YOLO 目录</h4>

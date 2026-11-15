@@ -269,3 +269,8 @@ details.adv[open] summary{margin-bottom:12px}
   .nav-item .ico{font-size:13px}
   .nav-group-title,.side-foot{display:none}
 }
+
+/* path input + native folder-picker button on one row */
+.input-row{display:flex;gap:8px;align-items:center;margin-top:6px}
+.input-row input{flex:1;min-width:0}
+.input-row .btn{flex:none;white-space:nowrap}
