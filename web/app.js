@@ -262,6 +262,10 @@ async function renderDatasets() {
       <textarea id="dsClassesEdit" rows="4">${esc(d.classes.join('\n'))}</textarea>
       <div class="btn-row"><button class="btn btn-primary btn-sm" id="btnSaveClasses">保存类别</button>
         <button class="btn btn-sm" id="btnOpenDs">打开目录</button></div>
+      <div class="divider"></div><h4>导入图片（自动划分 train / val）</h4>
+      <label>图片文件夹路径（粘贴的带引号路径也可以）<input id="dsImportSrc" placeholder="例如 D:\\photos\\raw"></label>
+      <label>验证集比例<input id="dsImportRatio" type="number" value="0.2" min="0" max="0.9" step="0.05"></label>
+      <div class="btn-row"><button class="btn btn-primary btn-sm" id="btnImportImgs">导入整个文件夹</button></div>
       <div class="divider"></div><h4>重新划分 train / val</h4>
       <label>验证集比例<input id="dsSplitRatio" type="number" value="0.2" min="0" max="0.9" step="0.05"></label>
       <button class="btn btn-sm" id="btnSplit">执行划分（移动图片与标签）</button>
@@ -274,6 +278,16 @@ async function renderDatasets() {
       catch (e) { toast(e.message, true); }
     };
     $('btnOpenDs').onclick = () => api('/api/open', { path: d.root }).catch(e => toast(e.message, true));
+    $('btnImportImgs').onclick = async () => {
+      try {
+        const r = await api('/api/dataset/import', {
+          name: d.name, src_dir: $('dsImportSrc').value.trim(),
+          val_ratio: parseFloat($('dsImportRatio').value)
+        });
+        toast(`已导入 ${r.imported} 张图片，已自动划分 train / val`);
+        renderDatasets();
+      } catch (e) { toast(e.message, true); }
+    };
     $('btnSplit').onclick = async () => {
       const ratio = parseFloat($('dsSplitRatio').value);
       try {

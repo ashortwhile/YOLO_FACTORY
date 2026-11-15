@@ -323,6 +323,45 @@ def list_models() -> dict:
 
 
 # --------------------------------------------------------------- API actions
+def _clean_path(v) -> str:
+    """Strip whitespace and matching quotes - Windows 'copy as path' pastes
+    paths as "C:\\folder", which silently broke image import."""
+    s = str(v or "").strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    return s
+
+
+def _import_images_from(src_raw: str, root: Path, ratio: float, rng_seed: int = 42) -> int:
+    """Copy a folder of images into a dataset, auto-splitting train/val.
+    Matching .txt label files are carried along. Returns the import count."""
+    src = _clean_path(src_raw)
+    if not src:
+        raise ValueError("请填写图片源目录")
+    if not Path(src).is_dir():
+        raise ValueError(f"图片源目录不存在或无法访问：{src}")
+    files = [p for p in Path(src).rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXT]
+    if not files:
+        raise ValueError(f"目录里没有图片（支持 {'/'.join(sorted(set(IMAGE_EXT)))}）：{src}")
+    random.Random(rng_seed).shuffle(files)
+    ratio = min(max(float(ratio), 0.0), 0.9)
+    n_val = int(len(files) * ratio)
+    imported = 0
+    for i, p in enumerate(files):
+        split = "val" if i < n_val else "train"
+        target = root / "images" / split / p.name
+        k = 1
+        while target.exists():
+            target = root / "images" / split / f"{p.stem}_{k}{p.suffix}"
+            k += 1
+        shutil.copy2(p, target)
+        lab = p.with_suffix(".txt")
+        if lab.is_file():
+            shutil.copy2(lab, root / "labels" / split / f"{target.stem}.txt")
+        imported += 1
+    return imported
+
+
 def action_dataset_create(b: dict) -> dict:
     name = str(b.get("name", "")).strip()
     if not name or any(c in name for c in '/\\:*?"<>|'):
@@ -337,27 +376,20 @@ def action_dataset_create(b: dict) -> dict:
         (root / "images" / split).mkdir(parents=True, exist_ok=True)
         (root / "labels" / split).mkdir(parents=True, exist_ok=True)
     write_dataset_meta(root, classes)
-    src = b.get("src_dir", "").strip()
+    src = _clean_path(b.get("src_dir", ""))
     imported = 0
-    ratio = float(b.get("val_ratio", 0.2))
-    if src and Path(src).is_dir():
-        files = [p for p in Path(src).rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXT]
-        random.Random(42).shuffle(files)
-        n_val = int(len(files) * ratio)
-        for i, p in enumerate(files):
-            split = "val" if i < n_val else "train"
-            target = root / "images" / split / p.name
-            k = 1
-            while target.exists():
-                target = root / "images" / split / f"{p.stem}_{k}{p.suffix}"
-                k += 1
-            shutil.copy2(p, target)
-            lab = p.with_suffix(".txt")
-            if lab.is_file():
-                shutil.copy2(lab, root / "labels" / split / f"{target.stem}.txt")
-            imported += 1
+    if src:
+        imported = _import_images_from(src, root, b.get("val_ratio", 0.2))
     return {"name": name, "imported": imported, "info": dataset_info({"name": name, "root": root,
                                                                      "kind": "local"})}
+
+
+def action_dataset_import(b: dict) -> dict:
+    """Import another folder of images into an EXISTING dataset (auto split)."""
+    d = get_dataset(str(b.get("name", "")).strip())
+    root = Path(d["root"])
+    imported = _import_images_from(b.get("src_dir", ""), root, b.get("val_ratio", 0.2))
+    return {"name": d["name"], "imported": imported, "info": dataset_info(d)}
 
 
 def action_dataset_attach(b: dict) -> dict:
@@ -690,6 +722,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(action_dataset_classes(b))
             if path == "/api/dataset/split":
                 return self._json(action_dataset_split(b))
+            if path == "/api/dataset/import":
+                return self._json(action_dataset_import(b))
             if path == "/api/dataset/discover":
                 return self._json(action_discover(b))
             if path == "/api/model/import":
