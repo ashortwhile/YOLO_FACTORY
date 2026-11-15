@@ -171,6 +171,25 @@ def stack_ready(py: str) -> bool:
     return ok
 
 
+def disk_free_gb(py: str) -> float:
+    """Free space (GB) on the drive that holds the runtime venv."""
+    try:
+        import shutil
+        drive = Path(py).anchor or "/"
+        return shutil.disk_usage(drive).free / 2 ** 30
+    except Exception:
+        return 999.0
+
+
+# GPU torch builds (CUDA / XPU / ROCm) unpack to several GB on top of the
+# wheel itself; CPU builds are much smaller.
+_TORCH_NEED_GB = {"cpu": 2.0}
+
+
+def torch_need_gb(backend: str) -> float:
+    return _TORCH_NEED_GB.get(backend, 6.0)
+
+
 def pick_or_create_venv(cfg: dict, sys_py: str) -> str:
     if cfg.get("venv_python") and Path(cfg["venv_python"]).exists():
         if stack_ready(cfg["venv_python"]):
@@ -278,14 +297,31 @@ def setup_dependencies(cfg: dict, py: str, plan: dict, force: bool) -> None:
     log(f"  target     : {backend} / {device}  (torch from {label})")
 
     info = hardware.probe_torch(py)
+    free_gb = disk_free_gb(py)
+    log(f"  disk free  : {free_gb:.1f} GB on {Path(py).anchor}")
     if force or not backend_matches(backend, info):
-        log("  installing the matching PyTorch build (large download, please wait)...")
-        ok = pip_install(py, ["torch", "torchvision", "--index-url", index],
-                         mirror, fallback=False)
-        if not ok and backend != "cpu":
-            log(f"  [warn] {backend} build unavailable -> falling back to CPU torch")
-            pip_install(py, ["torch", "torchvision", "--index-url",
-                             hardware.TORCH_ROOT + "cpu"], mirror, fallback=False)
+        need_gb = torch_need_gb(backend)
+        if free_gb < need_gb:
+            log(f"  [warn] 剩余空间 {free_gb:.1f} GB，装不下 {backend} 版 torch（约需 {need_gb:.0f} GB）")
+            if info.get("version"):
+                log("        保留现有 torch 不做任何改动，跳过本次下载（不会反复重试）")
+                log("        建议把软件安装到剩余空间充足的磁盘后再切换加速。")
+            else:
+                if free_gb < 2.0:
+                    raise RuntimeError(
+                        f"磁盘剩余 {free_gb:.1f} GB，连 CPU 版 torch 都装不下。"
+                        "请清理磁盘，或把软件安装到空间充足的磁盘（例如 D 盘）。")
+                log("        改装体积较小的 CPU 版，软件仍可正常使用。")
+                pip_install(py, ["torch", "torchvision", "--index-url",
+                                 hardware.TORCH_ROOT + "cpu"], mirror, fallback=False)
+        else:
+            log("  installing the matching PyTorch build (large download, please wait)...")
+            ok = pip_install(py, ["torch", "torchvision", "--index-url", index],
+                             mirror, fallback=False)
+            if not ok and backend != "cpu":
+                log(f"  [warn] {backend} build unavailable -> falling back to CPU torch")
+                pip_install(py, ["torch", "torchvision", "--index-url",
+                                 hardware.TORCH_ROOT + "cpu"], mirror, fallback=False)
     else:
         log(f"  torch already matches ({info.get('version')}) -> skip re-download")
 

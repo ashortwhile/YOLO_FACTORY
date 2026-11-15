@@ -20,6 +20,9 @@ original proxy settings restored via :func:`proxy_snapshot`.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
 
 _SHIM_HINTS = ("shim", "workbuddy", "app.asar", "codebuddy")
 
@@ -58,6 +61,23 @@ def clean_env(extra: dict | None = None, keep_proxy: bool = False) -> dict:
         # broken local tunnel -> "check_hostname requires server_hostname".
         # "*" forces direct connections for every host.
         env["NO_PROXY"] = "*"
+
+    # Keep pip's wheel cache and staging temp on the app's own drive. The
+    # default (%LOCALAPPDATA%\pip\cache + %TEMP%) sits on C: which is often
+    # nearly full - a 764 MB XPU/CUDA wheel then dies with
+    # "OSError: [Errno 28] No space left on device" even when the app is
+    # installed on a drive with plenty of room.
+    try:
+        pip_cache = ROOT / "cache" / "pip"
+        tmp_dir = ROOT / "cache" / "tmp"
+        pip_cache.mkdir(parents=True, exist_ok=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        env["PIP_CACHE_DIR"] = str(pip_cache)
+        env["TMP"] = str(tmp_dir)
+        env["TEMP"] = str(tmp_dir)
+        env["TMPDIR"] = str(tmp_dir)
+    except Exception:
+        pass   # read-only location: keep system defaults
         env["no_proxy"] = "*"
     for key in _CERT_VARS:
         val = env.get(key)

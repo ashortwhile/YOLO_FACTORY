@@ -94,6 +94,26 @@ def main() -> int:
 
     log(f"Target backend : {backend}")
     log(f"Wheel index    : {index}")
+
+    # disk preflight: never uninstall a working torch unless the new build
+    # actually fits on the drive (a full C: once destroyed a working XPU env)
+    import shutil
+    free_gb = shutil.disk_usage(Path(py).anchor).free / 2 ** 30
+    need_gb = 2.0 if backend in ("cpu", "mps") else 6.0
+    log(f"Disk free      : {free_gb:.1f} GB on {Path(py).anchor} (need ~{need_gb:.0f} GB)")
+    if free_gb < need_gb:
+        msg = (f"磁盘剩余 {free_gb:.1f} GB，装不下 {backend} 版 torch（约需 {need_gb:.0f} GB）。"
+               "已保留现有 torch 不做改动；请把软件安装到空间充足的磁盘（例如 D 盘）后重试。")
+        log(msg)
+        emit({"type": "warn", "message": msg})
+        result["ok"] = False
+        result["error"] = f"磁盘空间不足（剩余 {free_gb:.1f} GB），已保留现有环境"
+        emit({"type": "done", "result": result})
+        Path(job["result_path"]).write_text(
+            json.dumps({"ok": False, "result": result}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        return 1
+
     emit({"type": "stage", "message": f"installing torch for {backend}"})
 
     # Replace only torch / torchvision, keep the rest of the venv intact
