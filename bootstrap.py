@@ -95,11 +95,11 @@ def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def run(cmd: list[str], timeout: int = 1800) -> bool:
+def run(cmd: list[str], timeout: int = 1800, env: dict | None = None) -> bool:
     log("  $ " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
     try:
         subprocess.run(cmd, check=True, timeout=timeout, cwd=str(ROOT),
-                       env=env_utils.clean_env())
+                       env=env if env is not None else env_utils.clean_env())
         return True
     except Exception as exc:
         log(f"  [warn] command failed: {exc}")
@@ -210,7 +210,19 @@ def pip_install(py: str, args: list[str], mirror: str, fallback: bool = True) ->
         return False
     log("  [warn] install failed with that index, retrying with official PyPI...")
     retry = [c for c in cmd if c not in ("-i", url)]
-    return run(retry + ["-i", MIRRORS["pypi"]])
+    if run(retry + ["-i", MIRRORS["pypi"]]):
+        return True
+    proxies = env_utils.proxy_snapshot()
+    if proxies:
+        # direct connection failed and the launcher had proxy settings
+        # (agent shells inject local per-session tunnels) -> one last try
+        # through them before giving up.
+        log("  [warn] direct download failed, retrying with the inherited proxy...")
+        if run(cmd, env=env_utils.clean_env(keep_proxy=True)):
+            return True
+        return run(retry + ["-i", MIRRORS["pypi"]],
+                   env=env_utils.clean_env(keep_proxy=True))
+    return False
 
 
 def torch_plan_for(vendor: str, plan: dict) -> tuple[str, str]:

@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 """Child-process environment hygiene.
 
-Some IDE / agent shells inject a ``sitecustomize.py`` through ``PYTHONPATH``
-that guards ``os.unlink()`` with a bulk-delete guard. pip must unlink files
-while replacing wheels, so every install dies with ``SystemExit(1)`` in such a
-shell (symptom: "torch install failed; rolled back to CPU").
+Three real-world launch environments break pip / downloads, all fixed here:
 
-Stripping only those injected shim paths fixes it without touching anything
-else. Normal double-click launches have no shim and are unaffected.
+1. Some IDE / agent shells inject a ``sitecustomize.py`` through ``PYTHONPATH``
+   that guards ``os.unlink()`` with a bulk-delete guard. pip must unlink files
+   while replacing wheels, so every install dies with ``SystemExit(1)``.
+2. Agent / proxy shells export ``HTTP_PROXY`` / ``HTTPS_PROXY`` pointing at a
+   per-session local port. When that tunnel is down or half-configured, pip
+   dies with ``ValueError: check_hostname requires server_hostname`` (TLS to
+   the proxy) - before even reaching the mirror.
+3. ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE`` may point at files that were
+   deleted, breaking TLS verification for pip and urllib.
+
+Downloads in this app (PyPI mirrors, download.pytorch.org, hf-mirror.com) work
+without a proxy; when they do not, ``pip_install()`` retries once with the
+original proxy settings restored via :func:`proxy_snapshot`.
 """
 from __future__ import annotations
 
@@ -15,8 +23,17 @@ import os
 
 _SHIM_HINTS = ("shim", "workbuddy", "app.asar", "codebuddy")
 
+_PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy",
+               "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY")
+_CERT_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 
-def clean_env(extra: dict | None = None) -> dict:
+
+def proxy_snapshot() -> dict:
+    """Original proxy settings of the launching environment (for fallback retry)."""
+    return {k: os.environ[k] for k in _PROXY_VARS if os.environ.get(k)}
+
+
+def clean_env(extra: dict | None = None, keep_proxy: bool = False) -> dict:
     """Return an env copy safe for pip / training / probe subprocesses."""
     env = os.environ.copy()
     raw = env.get("PYTHONPATH", "") or ""
@@ -29,6 +46,23 @@ def clean_env(extra: dict | None = None) -> dict:
         env.pop("PYTHONPATH", None)
     # user-site sitecustomize could do the same thing
     env["PYTHONNOUSERSITE"] = "1"
+    if keep_proxy:
+        # fallback path: make sure nothing bypasses the inherited proxy
+        env.pop("NO_PROXY", None)
+        env.pop("no_proxy", None)
+    else:
+        for key in _PROXY_VARS:
+            env.pop(key, None)
+        # crucial: without this, pip/urllib silently fall back to the Windows
+        # registry system proxy (getproxies_registry), which may point at a
+        # broken local tunnel -> "check_hostname requires server_hostname".
+        # "*" forces direct connections for every host.
+        env["NO_PROXY"] = "*"
+        env["no_proxy"] = "*"
+    for key in _CERT_VARS:
+        val = env.get(key)
+        if val and not os.path.isfile(val):     # stale cert override breaks TLS
+            env.pop(key, None)
     if extra:
         env.update({k: str(v) for k, v in extra.items()})
     return env
