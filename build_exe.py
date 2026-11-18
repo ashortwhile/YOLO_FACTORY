@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Optional: build YOLO工坊.exe (a small windowed launcher, ~10 MB).
+"""Build YOLO工坊.exe - the standalone app launcher (small windowed EXE).
 
 PyTorch is NOT bundled - it stays in the venv managed by bootstrap.py, which is
 what makes the "download and auto-configure" workflow possible.
@@ -55,7 +55,7 @@ def main() -> int:
     if src.is_file():
         shutil.copy2(src, dst)
         print(f"\nDone: {dst}  ({dst.stat().st_size / 1048576:.1f} MB)")
-        print("Double-click it instead of 一键启动.bat. Keep it next to the .py / web files.")
+        print("This is the standalone launcher. build_setup.py bundles it into the installer.")
     return 0
 
 

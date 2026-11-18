@@ -82,18 +82,20 @@ def main() -> int:
         return 0 if ok else 1
 
     if backend == "xpu":
-        index = hardware.TORCH_ROOT + "xpu"
+        variant = "xpu"
     elif backend == "cuda":
         plan = hardware.build_plan(cfg, py)
-        tag = hardware.cuda_tag(plan.get("nvidia", {}).get("cuda_version", ""))
-        index = hardware.TORCH_ROOT + tag
-    elif backend == "cpu":
-        index = hardware.TORCH_ROOT + "cpu"
+        variant = hardware.cuda_tag(plan.get("nvidia", {}).get("cuda_version", ""))
     elif backend == "mps":
-        index = hardware.TORCH_ROOT + "cpu"
+        variant = "cpu"
+    else:
+        variant = "cpu"
 
+    # Domestic mirror first (fast), official PyTorch index as fallback.
+    indexes = hardware.torch_indexes(variant)
+    index = indexes[0]
     log(f"Target backend : {backend}")
-    log(f"Wheel index    : {index}")
+    log(f"Wheel index    : {index}  (fallback: {', '.join(indexes[1:]) or 'none'})")
 
     # disk preflight: never uninstall a working torch unless the new build
     # actually fits on the drive (a full C: once destroyed a working XPU env)
@@ -116,16 +118,25 @@ def main() -> int:
 
     emit({"type": "stage", "message": f"installing torch for {backend}"})
 
-    # Replace only torch / torchvision, keep the rest of the venv intact
+    # Replace only torch / torchvision, keep the rest of the venv intact.
+    # Try domestic mirror then official index for the same variant.
     run([py, "-m", "pip", "uninstall", "-y", "torch", "torchvision"], py)
-    ok = run([py, "-m", "pip", "install", "torch", "torchvision",
-              "--index-url", index, "--retries", "2"], py)
+    ok = False
+    for idx in indexes:
+        log(f"Trying wheel index: {idx}")
+        ok = run([py, "-m", "pip", "install", "torch", "torchvision",
+                  "--index-url", idx, "--retries", "2"], py)
+        if ok:
+            break
+        log("  [warn] that index failed, trying the next one...")
 
     if not ok:
         log("Install failed. Restoring a working CPU torch so the environment stays usable...")
         emit({"type": "warn", "message": "install failed, restoring CPU torch"})
-        run([py, "-m", "pip", "install", "torch", "torchvision",
-             "--index-url", hardware.TORCH_ROOT + "cpu", "--retries", "2"], py)
+        for idx in hardware.torch_indexes("cpu"):
+            if run([py, "-m", "pip", "install", "torch", "torchvision",
+                    "--index-url", idx, "--retries", "2"], py):
+                break
         result["error"] = "torch install failed; rolled back to CPU"
         result["ok"] = False
     else:
@@ -148,11 +159,17 @@ def main() -> int:
                                "Check the GPU driver / runtime, or stay on CPU.")
             emit({"type": "warn", "message": result["error"]})
 
-    # refresh cached hardware info in config.json
+    # Refresh cached hardware info. Re-read the file first: server.py and
+    # bootstrap.py may have updated config.json during this pip install.
     try:
-        cfg["hardware"] = hardware.build_plan(cfg, py)
-        cfg["device"] = cfg["hardware"]["recommended"]["device"] if cfg["hardware"]["ready"] else "cpu"
-        CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        fresh = (json.loads(CONFIG.read_text(encoding="utf-8"))
+                 if CONFIG.exists() else dict(cfg))
+        plan = hardware.build_plan(fresh, py)
+        fresh["hardware"] = plan
+        fresh["device"] = plan["recommended"]["device"] if plan["ready"] else "cpu"
+        tmp = CONFIG.with_name(f"config.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(fresh, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, CONFIG)
     except Exception as exc:
         log(f"config refresh skipped: {exc}")
 

@@ -13,10 +13,12 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT.parent / "YOLO工坊-绿色版.zip"
 TOP = "YOLOStudio"
 SKIP_DIRS = {".venv", "logs", "__pycache__", "dist", "build", ".git", ".idea",
-             ".appprofile", "workspace"}
+             ".appprofile", ".workbuddy", "workspace", "cache", "tests"}
 SKIP_FILES = {"config.json", "app.ico", "splash.png", "make_release.py",
-              "build_exe.py", "build_setup.py", "installer.py",
-              "打包分发.bat", "打包EXE.bat", "打包安装版.bat"}
+              "build_exe.py", "build_setup.py", "installer.py", "打包安装版.bat"}
+# The standalone app launcher is intentionally shipped inside the package;
+# all other EXEs (notably the setup EXE) must stay out.
+KEEP_EXE = {"YOLO工坊.exe"}
 EMPTY_DIRS = ["workspace/datasets", "workspace/models", "workspace/exports",
               "workspace/runs", "logs"]
 
@@ -32,7 +34,11 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
         rel = p.relative_to(ROOT)
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
-        if p.name in SKIP_FILES or p.suffix.lower() in (".pyc", ".zip", ".exe", ".spec"):
+        if p.name in SKIP_FILES:
+            continue
+        if p.suffix.lower() in (".pyc", ".zip", ".spec"):
+            continue
+        if p.suffix.lower() == ".exe" and p.name not in KEEP_EXE:
             continue
         files.append((p, str(Path(TOP) / rel)))
 
@@ -48,4 +54,4 @@ print(f"Portable package: {OUT}")
 print(f"Size: {OUT.stat().st_size / 1048576:.2f} MB, {len(files)} files")
 for _, arc in files:
     print("  " + arc)
-print("\nRecipient: unzip -> double-click 一键启动.bat -> automatic setup.")
+print("\nRecipient: unzip -> double-click YOLO工坊.exe -> automatic setup.")

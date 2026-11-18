@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
-"""YOLO Studio bootstrap - double-click 一键启动.bat (or run `python bootstrap.py`).
+"""YOLO Studio bootstrap - run via the standalone launcher EXE or `python bootstrap.py`.
 
 1. find a usable system Python
 2. reuse a ready venv or create an isolated one
-3. auto-detect NVIDIA / AMD / Intel / Apple GPU and install the matching torch build
-4. install the rest from a selectable mirror, seed models, discover existing datasets
-5. start the local service in a standalone desktop app window
+3. detect NVIDIA / AMD / Intel / Apple GPU and record the matching backend plan
+4. start the local service in a standalone desktop app window
+5. heavy runtime install (torch / ultralytics / weights) is optional and runs
+   later as a background task from the Environment page, so first launch is fast
+
+The service itself is standard-library only and runs before torch is present.
+`--force` still performs the full install synchronously (CLI / advanced use).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import socket
-import ssl
 import subprocess
 import sys
 import threading
@@ -23,6 +27,7 @@ import time
 import urllib.request
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
 
 import env_utils
 import hardware
@@ -88,11 +93,17 @@ def load_config() -> dict:
             cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception as exc:
             log(f"[warn] config.json unreadable ({exc}), using defaults")
+    if cfg.get("mirror") not in MIRRORS:
+        log(f"  [warn] unknown mirror {cfg.get('mirror')!r} -> using 'tsinghua'")
+        cfg["mirror"] = "tsinghua"
     return cfg
 
 
 def save_config(cfg: dict) -> None:
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Atomic replace: a crash must never leave a half-written config.json."""
+    tmp = CONFIG_PATH.with_name(f"config.json.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, CONFIG_PATH)
 
 
 def run(cmd: list[str], timeout: int = 1800, env: dict | None = None) -> bool:
@@ -101,9 +112,13 @@ def run(cmd: list[str], timeout: int = 1800, env: dict | None = None) -> bool:
         subprocess.run(cmd, check=True, timeout=timeout, cwd=str(ROOT),
                        env=env if env is not None else env_utils.clean_env())
         return True
+    except subprocess.TimeoutExpired:
+        log(f"  [warn] command timed out after {timeout}s: {cmd[0]}")
+    except subprocess.CalledProcessError as exc:
+        log(f"  [warn] command exited with code {exc.returncode}")
     except Exception as exc:
         log(f"  [warn] command failed: {exc}")
-        return False
+    return False
 
 
 def probe(cmd: list[str], timeout: int = 25) -> tuple[bool, str]:
@@ -123,8 +138,12 @@ def py_version(exe: str) -> tuple[int, int] | None:
 
 
 def find_system_python(cfg: dict) -> str:
-    if cfg.get("python") and py_version(cfg["python"]):
-        return cfg["python"]
+    if cfg.get("python"):
+        v = py_version(cfg["python"])
+        # Keys below are major*100+minor; reject unsupported versions from a
+        # stale config.json instead of proceeding with an incompatible Python.
+        if v and 309 <= v[0] * 100 + v[1] <= 313:
+            return cfg["python"]
     candidates: list[tuple[int, str]] = []
     ok, out = probe(["py", "-0p"])
     if ok:
@@ -144,7 +163,7 @@ def find_system_python(cfg: dict) -> str:
             v = py_version(exe)
             if v:
                 candidates.append((v[0] * 100 + v[1], exe))
-    priority = {310: 0, 311: 1, 312: 2, 39: 3, 313: 4, 38: 5}
+    priority = {310: 0, 311: 1, 312: 2, 309: 3, 313: 4}
     usable = [(k, p) for k, p in candidates if 309 <= k <= 313]
     if not usable:
         raise RuntimeError(
@@ -214,13 +233,19 @@ def pick_or_create_venv(cfg: dict, sys_py: str) -> str:
     return str(py)
 
 
+def _is_torch_index_arg(a: str) -> bool:
+    """True if this arg points at a PyTorch wheel index (official or mirror)."""
+    return ("download.pytorch.org" in a or "repo.amd.com" in a or
+            "pytorch-wheels" in a or "sjtu.edu.cn" in a)
+
+
 def pip_install(py: str, args: list[str], mirror: str, fallback: bool = True) -> bool:
     """Install with a long timeout. Torch wheels are large; never silently
     retry them against plain PyPI (that would pull a CUDA-heavy build)."""
     cmd = [py, "-m", "pip", "install", "--disable-pip-version-check",
            "--retries", "3", "--timeout", "120"]
     url = MIRRORS.get(mirror, MIRRORS["tsinghua"])
-    if not any("download.pytorch.org" in a or "repo.amd.com" in a for a in args):
+    if not any(_is_torch_index_arg(a) for a in args):
         cmd += ["-i", url]
     cmd += args
     if run(cmd):
@@ -244,19 +269,32 @@ def pip_install(py: str, args: list[str], mirror: str, fallback: bool = True) ->
     return False
 
 
-def torch_plan_for(vendor: str, plan: dict) -> tuple[str, str]:
-    """Return (index-url, human label) for a fresh install on this machine."""
+def _torch_variant(vendor: str, plan: dict) -> str:
+    """The wheel tag for this machine: xpu / cuda tag / cpu."""
+    if vendor == "intel":
+        return "xpu"
+    if vendor == "nvidia":
+        return hardware.cuda_tag(plan.get("nvidia", {}).get("cuda_version", ""))
+    return "cpu"
+
+
+def torch_plan_for(vendor: str, plan: dict, prefer_domestic: bool = True) -> tuple[str, str]:
+    """Return (index-url, human label) for a fresh install on this machine.
+
+    Domestic mirror (SJTU) is preferred so multi-GB wheels download over a
+    domestic line instead of the slow overseas download.pytorch.org.
+    """
     if vendor == "nvidia":
         tag = hardware.cuda_tag(plan.get("nvidia", {}).get("cuda_version", ""))
-        return hardware.TORCH_ROOT + tag, f"CUDA ({tag})"
+        return hardware.torch_index_url(tag, prefer_domestic), f"CUDA ({tag})"
     if vendor == "intel":
-        return hardware.TORCH_ROOT + "xpu", "Intel XPU"
+        return hardware.torch_index_url("xpu", prefer_domestic), "Intel XPU"
     if vendor == "amd":
         # PyTorch publishes no Windows ROCm wheels; HIP SDK users can switch manually later.
-        return hardware.TORCH_ROOT + "cpu", "CPU (AMD ROCm on Windows needs HIP SDK / WSL2)"
+        return hardware.torch_index_url("cpu", prefer_domestic), "CPU (AMD ROCm on Windows needs HIP SDK / WSL2)"
     if vendor == "apple":
-        return hardware.TORCH_ROOT + "cpu", "Apple MPS (standard PyPI torch)"
-    return hardware.TORCH_ROOT + "cpu", "CPU"
+        return hardware.torch_index_url("cpu", prefer_domestic), "Apple MPS (standard PyPI torch)"
+    return hardware.torch_index_url("cpu", prefer_domestic), "CPU"
 
 
 def backend_matches(backend: str, info: dict) -> bool:
@@ -276,13 +314,17 @@ def backend_matches(backend: str, info: dict) -> bool:
 
 def setup_dependencies(cfg: dict, py: str, plan: dict, force: bool) -> None:
     """First launch installs the newest torch build that suits the *detected*
-    GPU, plus the newest ultralytics. Nothing is hard-wired to one vendor."""
+    GPU, plus the newest ultralytics. Nothing is hard-wired to one vendor.
+
+    Fast path: if the venv is already complete and the torch backend matches,
+    skip ALL network work (pip self-upgrade, ultralytics sync, wheel checks).
+    This is what makes the 2nd+ launch start in ~2s and work fully offline.
+    `--force` always runs the full path; auto_update is throttled to once / 7d.
+    """
     section("Step 3/6  Install the newest runtime matching this GPU")
     mirror = cfg.get("mirror", "tsinghua")
-    log(f"  pip mirror : {MIRRORS.get(mirror, mirror)}")
-    subprocess.run([py, "-m", "pip", "install", "-q", "-U", "pip", "-i", MIRRORS[mirror]],
-                   cwd=str(ROOT), capture_output=True, timeout=300,
-                   env=env_utils.clean_env())
+    mirror_url = MIRRORS.get(mirror, MIRRORS["tsinghua"])
+    log(f"  pip mirror : {mirror_url}")
 
     vendor = plan.get("vendor", "cpu")
     recommended = plan.get("recommended") or {}
@@ -291,7 +333,8 @@ def setup_dependencies(cfg: dict, py: str, plan: dict, force: bool) -> None:
     index, label = torch_plan_for(vendor, plan)
     # Windows has no ROCm wheels and Apple uses the standard wheel: both are
     # a CPU install, so don't re-download torch on every launch.
-    if index == hardware.TORCH_ROOT + "cpu" and backend != "cpu":
+    cpu_indexes = (hardware.torch_index_url("cpu", True), hardware.torch_index_url("cpu", False))
+    if index in cpu_indexes and backend != "cpu":
         backend = "cpu"
     log(f"  detected   : {plan.get('vendor_label')}")
     log(f"  target     : {backend} / {device}  (torch from {label})")
@@ -299,6 +342,30 @@ def setup_dependencies(cfg: dict, py: str, plan: dict, force: bool) -> None:
     info = hardware.probe_torch(py)
     free_gb = disk_free_gb(py)
     log(f"  disk free  : {free_gb:.1f} GB on {Path(py).anchor}")
+
+    # ---- fast path: a complete, matching venv needs zero network ----
+    if not force and backend_matches(backend, info) and stack_ready(py):
+        last = cfg.get("last_setup") or ""
+        due = False
+        if cfg.get("auto_update", True) and last:
+            try:
+                due = (time.time() - time.mktime(time.strptime(last, "%Y-%m-%d %H:%M:%S"))) >= 7 * 86400
+            except Exception:
+                due = True
+        if not due:
+            log(f"  runtime ready ({info.get('version') or 'venv'}) -> skip all network checks")
+            log("  (use --force to reinstall / force-update packages)")
+            return
+        log("  weekly auto-update check enabled...")
+    else:
+        # Only upgrade pip when we're actually going to install something; a
+        # self-upgrade on every launch added tens of seconds (or a 300s stall).
+        up = subprocess.run([py, "-m", "pip", "install", "-q", "-U", "pip", "-i", mirror_url],
+                            cwd=str(ROOT), capture_output=True, timeout=120,
+                            env=env_utils.clean_env())
+        if up.returncode != 0:
+            detail = (up.stderr or b"").decode("utf-8", "replace").strip()[-300:]
+            log(f"  [warn] pip self-upgrade skipped: {detail or 'unknown error'}")
     if force or not backend_matches(backend, info):
         need_gb = torch_need_gb(backend)
         if free_gb < need_gb:
@@ -312,16 +379,32 @@ def setup_dependencies(cfg: dict, py: str, plan: dict, force: bool) -> None:
                         f"磁盘剩余 {free_gb:.1f} GB，连 CPU 版 torch 都装不下。"
                         "请清理磁盘，或把软件安装到空间充足的磁盘（例如 D 盘）。")
                 log("        改装体积较小的 CPU 版，软件仍可正常使用。")
-                pip_install(py, ["torch", "torchvision", "--index-url",
-                                 hardware.TORCH_ROOT + "cpu"], mirror, fallback=False)
+                for idx in hardware.torch_indexes("cpu"):
+                    if pip_install(py, ["torch", "torchvision", "--index-url", idx],
+                                   mirror, fallback=False):
+                        break
         else:
             log("  installing the matching PyTorch build (large download, please wait)...")
-            ok = pip_install(py, ["torch", "torchvision", "--index-url", index],
-                             mirror, fallback=False)
+            # Try the domestic mirror first (fast), then the official index.
+            # Both carry identical wheels; only the network path differs.
+            ok = False
+            tried = []
+            for idx in dict.fromkeys([index] + hardware.torch_indexes(_torch_variant(vendor, plan))):
+                where = "domestic mirror" if "sjtu.edu.cn" in idx else "official PyTorch"
+                log(f"  torch index: {idx}  ({where})")
+                tried.append(idx)
+                if pip_install(py, ["torch", "torchvision", "--index-url", idx],
+                               mirror, fallback=False):
+                    ok = True
+                    break
+                log("  [warn] that index failed, trying the next one...")
             if not ok and backend != "cpu":
-                log(f"  [warn] {backend} build unavailable -> falling back to CPU torch")
-                pip_install(py, ["torch", "torchvision", "--index-url",
-                                 hardware.TORCH_ROOT + "cpu"], mirror, fallback=False)
+                log(f"  [warn] {backend} build unavailable on all indexes -> falling back to CPU torch")
+                for idx in hardware.torch_indexes("cpu"):
+                    if pip_install(py, ["torch", "torchvision", "--index-url", idx],
+                                   mirror, fallback=False):
+                        ok = True
+                        break
     else:
         log(f"  torch already matches ({info.get('version')}) -> skip re-download")
 
@@ -330,7 +413,11 @@ def setup_dependencies(cfg: dict, py: str, plan: dict, force: bool) -> None:
         if not pip_install(py, ["-U", "ultralytics"], mirror):
             log("  [warn] ultralytics update unavailable (offline?) - keeping installed version")
 
-    if not pip_install(py, ["-r", str(ROOT / "requirements.txt")], mirror):
+    # Offline friendly: a complete venv needs no network at all. Previously a
+    # dead mirror aborted setup even when every package was already installed.
+    if stack_ready(py):
+        log("  dependencies already satisfied -> skip requirement install")
+    elif not pip_install(py, ["-r", str(ROOT / "requirements.txt")], mirror):
         raise RuntimeError("Dependency install failed. Check network / mirror in config.json")
     if not stack_ready(py):
         raise RuntimeError("Dependencies installed but import check failed. Re-run with --force")
@@ -341,41 +428,59 @@ MODEL_REPOS = {"yolo26": "YOLO26", "yolo11": "YOLO11", "yolov8": "YOLOv8",
 
 
 def auto_fetch_model(cfg: dict) -> None:
-    """First launch fetches the newest default weights from reachable mirrors.
-    Failure is non-fatal: the model page can download it later."""
+    """First launch fetches the default weights. Failure is non-fatal."""
     if not cfg.get("auto_download_model", True):
         return
-    name = cfg.get("default_model", "yolo26n.pt")
+    raw = str(cfg.get("default_model") or "yolo26n.pt")
+    name = Path(raw).name
+    # config.json is user-editable: never let it steer the write outside models/.
+    if name != raw or not re.fullmatch(r"[A-Za-z0-9._-]+\.(?:pt|onnx|yaml)", name):
+        log(f"  [warn] invalid default_model {raw!r} -> skip download")
+        return
     models = WORKSPACE / "models"
     models.mkdir(parents=True, exist_ok=True)
     target = models / name
     if target.is_file() and target.stat().st_size > 100_000:
         log(f"  model      : {name} already present")
         return
+    expected = str(cfg.get("model_sha256") or "").strip().lower()
+    if expected and not re.fullmatch(r"[0-9a-f]{64}", expected):
+        log("  [warn] model_sha256 is not a sha256 hex digest -> ignored")
+        expected = ""
     repo = next((v for k, v in MODEL_REPOS.items() if name.startswith(k)), "YOLO26")
     sources = [
         f"https://hf-mirror.com/Ultralytics/{repo}/resolve/main/{name}",
         f"https://huggingface.co/Ultralytics/{repo}/resolve/main/{name}",
         f"https://github.com/ultralytics/assets/releases/download/v8.4.0/{name}",
     ]
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    tmp = target.with_suffix(".part")
     for url in sources:
         try:
             log(f"  downloading {name} from {url.split('/')[2]} ...")
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            tmp = target.with_suffix(".part")
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as r, \
-                    tmp.open("wb") as fh:
-                shutil.copyfileobj(r, fh)
-            if tmp.stat().st_size < 100_000:
-                raise RuntimeError("download too small, probably an error page")
+            # Default TLS verification is intentional: .pt files are pickles and
+            # loading one executes code. Never disable certificate checks.
+            with urllib.request.urlopen(req, timeout=30) as r, tmp.open("wb") as fh:
+                shutil.copyfileobj(r, fh, 262144)
+            size = tmp.stat().st_size
+            if size < 100_000:
+                raise RuntimeError(f"only {size} bytes, probably an error page")
+            if expected:
+                digest = hashlib.sha256()
+                with tmp.open("rb") as f:
+                    for chunk in iter(lambda: f.read(262144), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected:
+                    raise RuntimeError("sha256 mismatch - refusing to use this file")
             tmp.replace(target)
-            log(f"  model      : {name} ready ({target.stat().st_size / 1048576:.1f} MB)")
+            log(f"  model      : {name} ready ({size / 1048576:.1f} MB)")
             return
         except Exception as exc:
-            log(f"  [warn] source failed: {str(exc)[:90]}")
+            log(f"  [warn] source failed: {str(exc)[:120]}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
     log("  [warn] model download skipped - use the 模型 page to retry later")
 
 
@@ -441,29 +546,78 @@ def find_chromium() -> str:
     return ""
 
 
-def launch_app(url: str, cfg: dict, delay: float = 2.5) -> None:
+def open_app_window(url: str, cfg: dict) -> None:
+    exe = find_chromium() if cfg.get("app_mode", True) else ""
+    if exe:
+        profile = WORKSPACE / ".appprofile"
+        profile.mkdir(parents=True, exist_ok=True)
+        args = [exe, f"--app={url}", "--window-size=1500,960", "--window-position=60,40",
+                f"--user-data-dir={profile}", "--no-first-run",
+                "--no-default-browser-check", "--disable-features=Translate,msEdgeSidebarV2"]
+        try:
+            subprocess.Popen(args, cwd=str(ROOT))
+            log(f"  desktop app window: {Path(exe).name}")
+            return
+        except Exception as exc:
+            log(f"  [warn] app window failed ({exc}), using default browser")
+    try:
+        if not webbrowser.open(url):
+            log("  [warn] no browser registered; open " + url + " manually")
+    except Exception as exc:
+        log(f"  [warn] could not open browser ({exc}); open {url} manually")
+
+
+def service_ready(host: str, port: int) -> bool:
+    """A busy TCP port is not proof OUR service is up - ask /api/health.
+
+    Use a raw HTTP connection instead of urllib: urllib honours the system
+    HTTP_PROXY/HTTPS_PROXY, and on Windows a proxy without 127.0.0.1 in
+    NO_PROXY silently swallows the loopback request. That made the app window
+    never open even though the local service was healthy. http.client connects
+    directly, so proxy settings can never interfere with local detection.
+    """
+    import http.client
+    conn = None
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=1.5)
+        conn.request("GET", "/api/health")
+        resp = conn.getresponse()
+        body = resp.read(256)
+        return resp.status == 200 and b"yolo-studio" in body
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def launch_app(url: str, cfg: dict, delay: float = 0.0) -> None:
+    """Open the window only once the service actually answers."""
     if not cfg.get("auto_open_browser", True):
         return
 
     def _launch():
-        time.sleep(delay)
-        exe = find_chromium() if cfg.get("app_mode", True) else ""
-        if exe:
-            profile = WORKSPACE / ".appprofile"
-            profile.mkdir(parents=True, exist_ok=True)
-            args = [exe, f"--app={url}", "--window-size=1500,960", "--window-position=60,40",
-                    f"--user-data-dir={profile}", "--no-first-run",
-                    "--no-default-browser-check", "--disable-features=Translate,msEdgeSidebarV2"]
-            try:
-                subprocess.Popen(args, cwd=str(ROOT))
-                log(f"  desktop app window: {Path(exe).name}")
-                return
-            except Exception as exc:
-                log(f"  [warn] app window failed ({exc}), using default browser")
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        if delay:
+            time.sleep(delay)
+        u = urlparse(url)
+        host, port = u.hostname or "127.0.0.1", u.port or 8765
+        deadline = time.time() + 90
+        while time.time() < deadline and not service_ready(host, port):
+            time.sleep(0.3)
+        if not service_ready(host, port):
+            # Never give up silently: a running service that we failed to
+            # probe must still get a visible window. Fall back to a plain
+            # browser tab, which is more likely to open than an Edge --app
+            # window from a frozen launcher.
+            log(f"  [warn] health check timed out; opening {url} in default browser anyway")
+            fallback = dict(cfg)
+            fallback["app_mode"] = False
+            open_app_window(url, fallback)
+            return
+        open_app_window(url, cfg)
 
     threading.Thread(target=_launch, daemon=True).start()
 
@@ -500,10 +654,16 @@ def main() -> int:
     log(f"  install dir : {ROOT}")
     host, port = cfg.get("host", "127.0.0.1"), int(cfg.get("port", 8765))
     url = f"http://{host}:{port}/"
-    if port_open(host, port) and not args.setup_only:
+    if service_ready(host, port) and not args.setup_only:
         log(f"\n  Service already running at {url} - opening the app window.")
-        launch_app(url, cfg, 0.2)
+        # Open synchronously: this branch returns immediately, so a daemon
+        # thread with a timer would die before opening anything.
+        open_app_window(url, cfg)
         return 0
+    if port_open(host, port) and not args.setup_only:
+        log(f"\n  [warn] port {port} is occupied by another program, not YOLO Studio.")
+        log("         Close it or change 'port' in config.json, then retry.")
+        return 1
 
     try:
         section("Step 1/6  Detect hardware and Python")
@@ -523,26 +683,44 @@ def main() -> int:
         cfg["venv_python"] = py
         log(f"  runtime     : {py}")
 
-        setup_dependencies(cfg, py, plan, args.force)
         discover_assets(cfg)
-        auto_fetch_model(cfg)
 
-        # full probe against the actual runtime, saved for the UI
+        # "Enter first, install later": the local service is pure standard
+        # library and runs fine without torch. On a brand-new venv we skip the
+        # multi-GB download here so the app window opens in seconds; the user
+        # installs the runtime from the Environment page as a background task.
+        # `--force` keeps the old blocking behaviour for CLI / advanced use.
+        runtime_ready = stack_ready(py)
+        if runtime_ready or args.force:
+            setup_dependencies(cfg, py, plan, args.force)
+            auto_fetch_model(cfg)
+            cfg["setup_ok"] = True
+            cfg["last_setup"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            log("  runtime ready - all features available")
+        else:
+            log("  runtime not installed yet -> opening the app first.")
+            log("  Use 环境与显卡 > 安装运行环境 to install it in the background.")
+            cfg["setup_ok"] = False
+
+        # full probe against the actual runtime, saved for the UI. Safe even
+        # when torch is absent: probe_torch just reports empty capabilities.
         full = hardware.build_plan(cfg, py)
         cfg["hardware"] = full
         cfg["device"] = full["recommended"]["device"] if full["ready"] else "cpu"
         log(f"  active backend: {full['active']['backend']} | "
             f"recommended: {full['recommended']['backend']} | ready: {full['ready']}")
-        if not full["ready"]:
-            log("  -> Open the 环境 / Environment page and click '启用显卡加速' to switch.")
-
-        cfg["setup_ok"] = True
-        cfg["last_setup"] = time.strftime("%Y-%m-%d %H:%M:%S")
         save_config(cfg)
     except Exception as exc:
         log(f"\n[ERROR] setup failed: {exc}")
-        log("  Fix the issue above and run 一键启动.bat again.")
-        save_config(cfg)
+        log("  Fix the issue above and run the launcher again.")
+        # cfg still holds the previous run's setup_ok=True; never let the UI
+        # believe a failed environment is ready.
+        cfg["setup_ok"] = False
+        cfg["last_error"] = str(exc)
+        try:
+            save_config(cfg)
+        except Exception as write_exc:
+            log(f"  [warn] could not save config: {write_exc}")
         return 1
 
     if args.setup_only:

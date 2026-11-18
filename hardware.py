@@ -17,9 +17,41 @@ from pathlib import Path
 
 import env_utils
 
+# Official PyTorch wheel index. Kept as the fallback of last resort.
 TORCH_ROOT = "https://download.pytorch.org/whl/"
+# Domestic mirror of the SAME index (full mirror: cpu / xpu / cuNNN tags).
+# download.pytorch.org is hosted overseas and is very slow from mainland China;
+# the SJTU mirror carries identical wheels over a domestic line. If a tag is
+# ever missing there, callers fall back to TORCH_ROOT.
+TORCH_MIRROR_ROOT = "https://mirror.sjtu.edu.cn/pytorch-wheels/"
 CUDA_TAGS = ["cu132", "cu130", "cu128", "cu126", "cu124", "cu121"]
 MIN_ULTRALYTICS = "8.4.111"  # first release with unified XPU / ROCm / NPU device handling
+
+# Variants that the domestic mirror is known to carry. Keep this explicit so a
+# future tag is never silently assumed to exist (would break offline installs).
+_MIRRORED_TAGS = {"cpu", "xpu", "cu132", "cu130", "cu128", "cu126", "cu124", "cu121"}
+
+
+def torch_index_url(variant: str, prefer_domestic: bool = True) -> str:
+    """Return the --index-url for a torch variant (cpu/xpu/cuNNN).
+
+    Domestic mirror is preferred for speed; official index stays available as
+    a fallback via the caller. Pass prefer_domestic=False to force official.
+    """
+    tag = variant.strip().rstrip("/").split("/")[-1] or "cpu"
+    if prefer_domestic and tag.lower() in _MIRRORED_TAGS:
+        return TORCH_MIRROR_ROOT + tag
+    return TORCH_ROOT + tag
+
+
+def torch_indexes(variant: str) -> list[str]:
+    """Ordered list of indexes to try: domestic first, official fallback."""
+    seen, out = set(), []
+    for url in (torch_index_url(variant, True), torch_index_url(variant, False)):
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
 
 VIRTUAL_HINTS = ("virtual display", "microsoft basic", "vmware", "virtualbox",
                  "parsec", "gameviewer", "remote display", "dummy")
@@ -146,25 +178,22 @@ def nvidia_info() -> dict:
 
 
 def cuda_tag(cuda_version: str) -> str:
-    if not cuda_version:
-        return CUDA_TAGS[2]
+    """Map a driver CUDA version to the newest *published* wheel tag.
+
+    Only tags listed in CUDA_TAGS exist on download.pytorch.org; returning an
+    invented one (e.g. cu134) makes the whole install fail with a 404.
+    """
     try:
         v = float(cuda_version)
-    except ValueError:
+    except (TypeError, ValueError):
         return CUDA_TAGS[2]
-    if v >= 13.4:
-        return "cu134"
-    if v >= 13.2:
-        return "cu132"
-    if v >= 13.0:
-        return "cu130"
-    if v >= 12.8:
-        return "cu128"
-    if v >= 12.6:
-        return "cu126"
-    if v >= 12.4:
-        return "cu124"
-    return "cu121"
+    thresholds = ((13.4, CUDA_TAGS[0]), (13.2, CUDA_TAGS[0]),
+                  (13.0, CUDA_TAGS[1]), (12.8, CUDA_TAGS[2]),
+                  (12.6, CUDA_TAGS[3]), (12.4, CUDA_TAGS[4]))
+    for minimum, tag in thresholds:
+        if v >= minimum:
+            return tag
+    return CUDA_TAGS[5]
 
 
 def probe_torch(python_exe: str) -> dict:
@@ -214,7 +243,7 @@ def build_plan(cfg: dict, python_exe: str = "", *, quick: bool = False) -> dict:
 
     recommended = "cpu"
     device = "cpu"
-    torch_index = TORCH_ROOT + "cpu"
+    torch_index = torch_index_url("cpu")
     min_ultra = ""
     note = "未检测到可用显卡，使用 CPU 训练。"
     experimental = False
@@ -223,13 +252,16 @@ def build_plan(cfg: dict, python_exe: str = "", *, quick: bool = False) -> dict:
     if vendor == "nvidia":
         recommended, device = "cuda", "0"
         tag = cuda_tag(nv.get("cuda_version", ""))
-        torch_index = TORCH_ROOT + tag
-        note = (f"检测到 {primary['name']}，推荐 CUDA 后端（{tag}）。"
-                f"驱动 {primary['driver']}，运行时 CUDA {nv.get('cuda_version') or '未知'}。")
+        torch_index = torch_index_url(tag)
+        # primary can be None when nvidia-smi answers but WDDM enumeration
+        # found no adapter; indexing into None used to crash the whole setup.
+        gpu = primary or {}
+        note = (f"检测到 {gpu.get('name') or 'NVIDIA GPU'}，推荐 CUDA 后端（{tag}）。"
+                f"驱动 {gpu.get('driver') or '未知'}，运行时 CUDA {nv.get('cuda_version') or '未知'}。")
         steps = [f"安装 {tag} 版 torch / torchvision", "验证 torch.cuda.is_available()"]
     elif vendor == "intel":
         recommended, device = "xpu", "xpu:0"
-        torch_index = TORCH_ROOT + "xpu"
+        torch_index = torch_index_url("xpu")
         min_ultra = MIN_ULTRALYTICS
         note = (f"检测到 {primary['name']}（驱动 {primary['driver']}）。"
                 "官方 PyTorch XPU 构建可直接用 device=xpu:0 训练；"
@@ -248,7 +280,7 @@ def build_plan(cfg: dict, python_exe: str = "", *, quick: bool = False) -> dict:
                  f"升级 ultralytics 到 >= {MIN_ULTRALYTICS}", "验证 torch.cuda.is_available()"]
     elif vendor == "apple":
         recommended, device = "mps", "mps"
-        torch_index = TORCH_ROOT + "cpu"
+        torch_index = torch_index_url("cpu")
         note = "检测到 Apple Silicon，使用 MPS 后端。"
 
     ultra = torch_info.get("ultralytics", "")

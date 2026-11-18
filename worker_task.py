@@ -8,13 +8,16 @@ The final result is written as JSON to job["result_path"].
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Must be set before importing ultralytics: avoids the Arial.ttf download error on offline machines
 os.environ["ULTRALYTICS_DOWNLOAD_FONT"] = "0"
@@ -286,21 +289,44 @@ def model_sources(name: str) -> list[str]:
     ]
 
 
+ALLOWED_DOMAINS = ("hf-mirror.com", "huggingface.co", "github.com",
+                   "githubusercontent.com", "ultralytics.com")
+MAX_MODEL_BYTES = 500 * 1024 * 1024
+MODEL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\.(?:pt|onnx|yaml)\Z")
+
+
+def _safe_url(url: str) -> bool:
+    """Defence in depth: server.py validates, but jobs can be replayed too."""
+    try:
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        return (u.scheme == "https" and bool(host)
+                and not u.username and not u.password and u.port is None
+                and any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS))
+    except Exception:
+        return False
+
+
 def do_download_model(p: dict) -> dict:
     """Download a pretrained weight with automatic source fallback."""
-    import ssl
     import urllib.request
 
     MODELS.mkdir(parents=True, exist_ok=True)
-    name = Path(p["model"]).name
+    name = str(p.get("model") or "")
+    if not MODEL_NAME_RE.fullmatch(name):
+        raise RuntimeError("invalid model filename (expected name.pt / .onnx / .yaml)")
     target = MODELS / name
     if target.is_file() and target.stat().st_size > 100000:
         return {"path": str(target), "cached": True, "size": target.stat().st_size}
 
-    urls = ([p["url"]] if p.get("url") else []) + model_sources(name)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    expected = str(p.get("sha256") or "").strip().lower()
+    if expected and not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("invalid sha256")
+    custom = str(p.get("url") or "").strip()
+    if custom and not _safe_url(custom):
+        raise RuntimeError("download URL must be https from a known model host")
+    urls = ([custom] if custom else []) + model_sources(name)
+
     errors = []
     for url in urls:
         tmp = MODELS / (name + ".part")
@@ -309,7 +335,9 @@ def do_download_model(p: dict) -> dict:
             emit({"type": "stage", "message": "下载源 " + url.split("/")[2]})
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             done = 0
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as r, tmp.open("wb") as f:
+            # TLS verification stays ON: .pt weights are pickles, so a tampered
+            # download is arbitrary code execution when YOLO() loads it.
+            with urllib.request.urlopen(req, timeout=30) as r, tmp.open("wb") as f:
                 total = int(r.headers.get("Content-Length") or 0)
                 while True:
                     chunk = r.read(262144)
@@ -317,9 +345,18 @@ def do_download_model(p: dict) -> dict:
                         break
                     f.write(chunk)
                     done += len(chunk)
+                    if done > MAX_MODEL_BYTES:
+                        raise RuntimeError("download exceeded the 500 MB limit")
                     emit({"type": "progress", "done": done, "total": total, "file": name})
             if done < 100000:
                 raise RuntimeError(f"only {done} bytes received")
+            if expected:
+                digest = hashlib.sha256()
+                with tmp.open("rb") as f:
+                    for chunk in iter(lambda: f.read(262144), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected:
+                    raise RuntimeError("sha256 mismatch - refusing to use this file")
             tmp.replace(target)
             log(f"Downloaded {name}: {done / 1048576:.1f} MB")
             return {"path": str(target), "size": done, "source": url.split("/")[2]}

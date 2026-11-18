@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 *.log
 logs/
+cache/
 
 # ---- machine-specific config / install record ----
 config.json
@@ -13,14 +14,17 @@ config.json
 workspace/
 
 # ---- build artifacts and release binaries ----
+# app.ico / splash.png are SOURCE assets (build_setup.py, installer.py and
+# build_exe.py need them), so they must stay tracked, not ignored.
 build/
 dist/
 payload.zip
-app.ico
-splash.png
 *.spec
 *.exe
 *.zip
+
+# ---- agent workspace data (not project source) ----
+.workbuddy/
 
 # ---- editor / OS ----
 .DS_Store

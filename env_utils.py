@@ -78,7 +78,8 @@ def clean_env(extra: dict | None = None, keep_proxy: bool = False) -> dict:
         env["TMPDIR"] = str(tmp_dir)
     except Exception:
         pass   # read-only location: keep system defaults
-        env["no_proxy"] = "*"
+        # Do NOT force no_proxy here: on the keep_proxy fallback path that
+        # would silently disable the inherited proxy we are trying to use.
     for key in _CERT_VARS:
         val = env.get(key)
         if val and not os.path.isfile(val):     # stale cert override breaks TLS

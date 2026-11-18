@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
-"""YOLO 工坊 —— 单文件 EXE（安装程序 / 软件主程序 / 卸载程序 三合一）。
+"""YOLO 工坊 —— 安装程序（安装 / 卸载两用）。
 
-同一个 EXE 有三种身份：
-  1. 放在任意位置、旁边没有 bootstrap.py      -> 图形安装向导
-  2. 位于安装目录、旁边有 bootstrap.py         -> 软件主程序（调用 bootstrap.py 自动配环境）
-  3. 带 --uninstall 参数                       -> 卸载（控制面板「添加或删除程序」入口）
+安装器与启动器是**两个独立 EXE**：
+  * YOLOStudioSetup.exe（本程序）—— 安装向导 + 卸载程序；
+  * YOLO工坊.exe（launcher.py 单独打包，随 payload 一起分发）—— 软件启动器。
+
+安装器不再充当启动器。它把 payload 解压到目标目录（其中已含独立启动器），
+再创建指向该启动器的桌面 / 开始菜单快捷方式，并写入卸载注册表项。
+控制面板「添加或删除程序」用 --uninstall 调用本 EXE。
 
 静默部署参数：
   --silent --dir="D:\\Somewhere" [--no-shortcuts] [--launch]
   --uninstall [--silent] [--keep-data]
 
 设计要点：EXE 里只内嵌纯代码压缩包（不含 venv / 不含本机 config / 不含数据集），
-装到任何一台 Windows 机器后首次运行才由 bootstrap.py 自动配置 Python 环境。
+装到任何一台 Windows 机器后首次运行才由独立启动器 + bootstrap.py 配置环境。
 """
 from __future__ import annotations
 
@@ -28,11 +31,15 @@ import time
 import zipfile
 from pathlib import Path
 
+from version import APP_VERSION
+
 APP_NAME = "YOLO 工坊"
 APP_ID = "YOLOStudio"
-VERSION = "1.0.0"
+VERSION = APP_VERSION
 PUBLISHER = "YOLO Studio"
-EXE_NAME = "YOLO工坊.exe"
+EXE_NAME = "YOLO工坊.exe"          # 独立启动器（随 payload 分发，安装器不再复制自身充当）
+LAUNCH_EXE = EXE_NAME
+UNINSTALL_EXE = "卸载YOLO工坊.exe"   # 安装目录里保留的安装器副本，专供卸载
 SHORTCUT_NAME = "YOLO 工坊.lnk"
 UNINSTALL_NAME = "卸载 YOLO 工坊.lnk"
 INFO_NAME = "安装信息.json"
@@ -65,8 +72,13 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def alert(msg: str, title: str = APP_NAME, kind: str = "info") -> bool:
-    """Show a native dialog. Returns True for yes / ok."""
+def alert(msg: str, title: str = APP_NAME, kind: str = "info",
+          default: bool = True) -> bool:
+    """Show a native dialog. Returns True for yes / ok.
+
+    If Tk is broken the dialog cannot be shown - default to the SAFE answer so
+    a failed "keep user data?" prompt never silently deletes the workspace.
+    """
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -80,7 +92,7 @@ def alert(msg: str, title: str = APP_NAME, kind: str = "info") -> bool:
         return bool(res)
     except Exception:
         log("dialog failed: " + msg)
-        return False
+        return default
 
 
 def native_alert(msg: str, title: str = APP_NAME, timeout_ms: int = 0) -> None:
@@ -105,7 +117,15 @@ def native_alert(msg: str, title: str = APP_NAME, timeout_ms: int = 0) -> None:
 
 
 def close_splash() -> None:
-    """Close PyInstaller's boot splash (shown while the onefile archive unpacks)."""
+    """Close PyInstaller's boot splash, if this build actually has one.
+
+    Builds made without a splash (e.g. a Python without tkinter) still include
+    the pyi_splash stub, whose import raises KeyError and prints a traceback to
+    stderr. Detect the IPC handle first so those builds stay silent.
+    """
+    import os
+    if not os.environ.get("_PYI_SPLASH_IPC"):
+        return
     try:
         import pyi_splash  # type: ignore
         pyi_splash.close()
@@ -192,16 +212,17 @@ def reg_write(inst: Path) -> None:
     if not IS_WIN:
         return
     import winreg
-    exe = inst / EXE_NAME
+    launcher = inst / EXE_NAME
+    uninstaller = inst / UNINSTALL_EXE
     k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0, winreg.KEY_WRITE)
     values = {
         "DisplayName": APP_NAME,
         "DisplayVersion": VERSION,
         "Publisher": PUBLISHER,
-        "DisplayIcon": str(exe) + ",0",
+        "DisplayIcon": str(launcher) + ",0",
         "InstallLocation": str(inst),
-        "UninstallString": '"%s" --uninstall' % exe,
-        "QuietUninstallString": '"%s" --uninstall --silent --keep-data' % exe,
+        "UninstallString": '"%s" --uninstall' % uninstaller,
+        "QuietUninstallString": '"%s" --uninstall --silent --keep-data' % uninstaller,
         "URLInfoAbout": "https://docs.ultralytics.com/",
         "Comments": "YOLO 数据集标注 / 训练 / 推理一体化工作台",
     }
@@ -287,12 +308,29 @@ $s.Save()
 
 
 # --------------------------------------------------------------------------- install
+MAX_UNPACK_BYTES = 300 * 1024 * 1024
+
+
+def _copy_limited(src, out, limit: int) -> int:
+    done = 0
+    while True:
+        chunk = src.read(262144)
+        if not chunk:
+            break
+        done += len(chunk)
+        if done > limit:
+            raise RuntimeError("payload exceeds the size limit (possible zip bomb)")
+        out.write(chunk)
+    return done
+
+
 def extract(inst: Path, progress=None) -> int:
     payload = find_payload()
     if not payload:
         raise RuntimeError("安装包内缺少程序文件（payload.zip）。请重新下载完整的安装程序。")
     inst.mkdir(parents=True, exist_ok=True)
-    written = 0
+    root = inst.resolve()
+    written, unpacked = 0, 0
     with zipfile.ZipFile(payload) as zf:
         members = zf.infolist()
         total = max(1, len(members))
@@ -301,32 +339,64 @@ def extract(inst: Path, progress=None) -> int:
             if parts and parts[0] == "YOLOStudio":
                 parts = parts[1:]
             if not parts or any(p == ".." for p in parts):
-                continue                      # zip-slip guard
+                continue                      # zip-slip guard (first line)
             rel = Path(*parts)
-            dest = inst / rel
+            dest = (root / rel).resolve()
+            # Filtering ".." is not enough on Windows: drive-relative or
+            # absolute entries ("C:\\...", "\\\\server\\...") override the
+            # left operand and would write outside the install directory.
+            if not dest.is_relative_to(root):
+                raise RuntimeError("unsafe path in payload: " + m.filename)
             if m.is_dir() or m.filename.endswith("/"):
                 dest.mkdir(parents=True, exist_ok=True)
             else:
+                limit = MAX_UNPACK_BYTES - unpacked
+                if limit <= 0 or m.file_size > limit:
+                    raise RuntimeError("payload exceeds the size limit (possible zip bomb)")
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(m) as src, dest.open("wb") as out:
-                    shutil.copyfileobj(src, out, 262144)
+                    unpacked += _copy_limited(src, out, limit)
                 written += 1
             if progress:
                 progress(i + 1, total, rel.name or rel.parent.name)
     return written
 
 
-def install(inst: Path, shortcuts: bool = True, progress=None) -> dict:
+def install(inst: Path, shortcuts: bool = True, progress=None,
+            desk: bool = True, menu: bool = True) -> dict:
     log("install start -> %s" % inst)
     if not inst.is_absolute():
         raise RuntimeError("安装目录必须是绝对路径。")
     inst.mkdir(parents=True, exist_ok=True)
-    count = extract(inst, progress)
-
-    dst_exe = inst / EXE_NAME
-    if SELF.resolve() != dst_exe.resolve():
-        shutil.copy2(SELF, dst_exe)
-    log("copied launcher -> %s" % dst_exe)
+    # Stage first, commit second: a failed install must never leave a
+    # half-overwritten program directory (the old code wrote in place).
+    staging = inst.parent / ("." + APP_ID + "-staging-" + str(os.getpid()))
+    try:
+        if staging.exists():
+            shutil.rmtree(staging)
+        count = extract(staging, progress)
+        # The launcher is an independent EXE shipped inside payload.zip. The
+        # installer no longer clones itself to impersonate the app launcher.
+        staged_launcher = staging / EXE_NAME
+        if not staged_launcher.is_file():
+            raise RuntimeError("安装包缺少启动器（YOLO工坊.exe），请重新下载完整的安装程序。")
+        # Keep a private copy of this EXE in the install dir as the uninstaller,
+        # so Control Panel / Settings can remove the app even if the setup file
+        # the user downloaded is later deleted.
+        staged_uninstaller = staging / UNINSTALL_EXE
+        if SELF.resolve() != staged_uninstaller.resolve():
+            shutil.copy2(SELF, staged_uninstaller)
+        for src in staging.iterdir():
+            dst = inst / src.name
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    launcher = inst / EXE_NAME
+    uninstaller = inst / UNINSTALL_EXE
+    log("installed launcher -> %s ; uninstaller -> %s" % (launcher, uninstaller))
 
     info = {"app": APP_NAME, "version": VERSION, "install_dir": str(inst),
             "installed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -334,148 +404,21 @@ def install(inst: Path, shortcuts: bool = True, progress=None) -> dict:
     if shortcuts and IS_WIN:
         desktop, programs = shell_folders()
         folder = programs / APP_NAME
-        targets = [
-            (desktop / SHORTCUT_NAME, "", "YOLO 工坊 · 标注 / 训练 / 推理"),
-            (folder / SHORTCUT_NAME, "", "YOLO 工坊 · 标注 / 训练 / 推理"),
-            (folder / UNINSTALL_NAME, "--uninstall", "卸载 YOLO 工坊"),
-        ]
-        for lnk, args, desc in targets:
-            if make_shortcut(lnk, dst_exe, inst, args, desc):
+        desc = "YOLO 工坊 · 标注 / 训练 / 推理"
+        targets = []
+        if desk:
+            targets.append((desktop / SHORTCUT_NAME, launcher, "", desc))
+        if menu:
+            targets.append((folder / SHORTCUT_NAME, launcher, "", desc))
+            targets.append((folder / UNINSTALL_NAME, uninstaller, "--uninstall", "卸载 YOLO 工坊"))
+        for lnk, exe, args, desc in targets:
+            if make_shortcut(lnk, exe, inst, args, desc):
                 info["shortcuts"].append(str(lnk))
     (inst / INFO_NAME).write_text(json.dumps(info, ensure_ascii=False, indent=2),
                                   encoding="utf-8")
     reg_write(inst)
     log("install done: %d files, %d shortcuts" % (count, len(info["shortcuts"])))
     return info
-
-
-# --------------------------------------------------------------------------- launch
-def find_python(root: Path) -> list[str] | None:
-    cfg = root / "config.json"
-    if cfg.is_file():
-        try:
-            data = json.loads(cfg.read_text(encoding="utf-8"))
-            for key in ("venv_python", "python"):
-                val = data.get(key)
-                if val and Path(val).is_file():
-                    return [val]
-        except Exception:
-            pass
-    for name in ("python", "python3"):
-        found = shutil.which(name)
-        if found:
-            return [found]
-    if shutil.which("py"):
-        return ["py", "-3"]
-    return None
-
-
-def service_port() -> int:
-    try:
-        cfg = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
-        return int(cfg.get("port") or 8765)
-    except Exception:
-        return 8765
-
-
-def service_ready(port: int) -> bool:
-    import socket
-    with socket.socket() as s:
-        s.settimeout(0.15)
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def show_startup_progress(proc, startup: Path, port: int) -> None:
-    """Visible feedback while bootstrap configures the environment (can take minutes)."""
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-    except Exception as exc:
-        log("progress window unavailable: %r" % exc)
-        return
-    close_splash()
-    try:
-        root = tk.Tk()
-        root.title("YOLO 工坊 · 正在启动")
-        root.geometry("600x330")
-        root.resizable(False, False)
-        root.configure(bg="#f7f9fc")
-        tk.Label(root, text="正在配置运行环境", font=("Microsoft YaHei", 16, "bold"),
-                 fg="#0f172a", bg="#f7f9fc").pack(anchor="w", padx=22, pady=(18, 2))
-        tk.Label(root, text="首次启动会按显卡下载对应依赖，可能持续几分钟，请保持网络畅通。",
-                 font=("Microsoft YaHei", 9), fg="#64748b",
-                 bg="#f7f9fc").pack(anchor="w", padx=22)
-        bar = ttk.Progressbar(root, mode="indeterminate", length=556)
-        bar.pack(padx=22, pady=(12, 8))
-        bar.start(12)
-        text = tk.Text(root, height=10, bg="#ffffff", fg="#334155", relief="flat",
-                       font=("Consolas", 9), wrap="word")
-        text.pack(fill="both", expand=True, padx=22, pady=(0, 18))
-        text.insert("1.0", "准备中…\n")
-
-        def poll():
-            content = ""
-            try:
-                content = startup.read_text(encoding="utf-8", errors="replace")
-                lines = content.splitlines()[-12:]
-                text.delete("1.0", "end")
-                text.insert("1.0", "\n".join(lines) + "\n")
-                text.see("end")
-            except Exception:
-                pass
-            # bootstrap logs "URL: http://..." right before the app window opens
-            ready = ("URL: http://" in content or "Service already running" in content
-                     or service_ready(port))
-            if proc.poll() is not None or ready:
-                root.destroy()
-                return
-            root.after(600, poll)
-
-        log("progress window shown")
-        root.after(400, poll)
-        root.mainloop()
-        log("progress window closed")
-    except Exception as exc:
-        log("progress window failed: %r" % exc)
-
-
-def launch() -> int:
-    """Software mode: delegate to bootstrap.py which sets up the environment."""
-    py = find_python(HERE)
-    if not py:
-        native_alert("没有找到 Python。请先安装 Python 3.9~3.12 再启动本软件，"
-                     "或从开始菜单重新安装。")
-        return 1
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
-    env.pop("PYTHONPATH", None)          # avoid injected sitecustomize hooks
-    logs = HERE / "logs"
-    logs.mkdir(exist_ok=True)
-    startup = logs / "startup.log"
-    log("launch: %s bootstrap.py" % " ".join(py))
-    try:
-        fh = startup.open("w", encoding="utf-8", errors="replace")
-        proc = subprocess.Popen(
-            py + [str(HERE / "bootstrap.py")], cwd=str(HERE),
-            stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            env=env, creationflags=NO_WINDOW)
-        show_startup_progress(proc, startup, service_port())
-        code = proc.wait()
-        try:
-            fh.close()
-        except Exception:
-            pass
-        if code:
-            tail = "\n".join(startup.read_text(encoding="utf-8", errors="replace")
-                             .splitlines()[-25:])
-            native_alert("启动失败（退出码 %s）。\n\n%s\n\n完整日志：%s"
-                         % (code, tail, startup))
-        return code
-    except Exception as exc:
-        log("launch failed: %r" % exc)
-        native_alert("启动失败：%s" % exc)
-        return 1
 
 
 # --------------------------------------------------------------------------- uninstall
@@ -486,9 +429,24 @@ def finish_uninstall(inst: Path, keep_data: bool, silent: bool) -> int:
         try:
             info = json.loads(info_file.read_text(encoding="utf-8"))
             shortcuts = info.get("shortcuts") or []
+            allowed_roots = []
+            try:
+                allowed_roots = [p.resolve() for p in shell_folders()]
+            except Exception:
+                pass
             for lnk in shortcuts:
+                p = Path(lnk)
+                # The info file is user-writable; never let it point unlink()
+                # at an arbitrary file on the machine.
+                if p.suffix.lower() != ".lnk":
+                    log("skip non-shortcut path %s" % lnk)
+                    continue
+                if allowed_roots and not any(p.resolve().is_relative_to(r)
+                                             for r in allowed_roots):
+                    log("skip shortcut outside shell folders %s" % lnk)
+                    continue
                 try:
-                    Path(lnk).unlink(missing_ok=True)
+                    p.unlink(missing_ok=True)
                     log("removed shortcut %s" % lnk)
                 except Exception as exc:
                     log("shortcut remove failed %r" % exc)
@@ -504,6 +462,10 @@ def finish_uninstall(inst: Path, keep_data: bool, silent: bool) -> int:
     reg_delete()
 
     if inst and inst.is_dir():
+        # Guard against a corrupted/edited install path: rmtree() is not undoable.
+        if not ((inst / "bootstrap.py").is_file() or (inst / INFO_NAME).is_file()):
+            log("refusing to delete %s: not a YOLO Studio install" % inst)
+            return 1
         if keep_data:
             data = inst / "workspace"
             if data.is_dir():
@@ -615,7 +577,7 @@ def gui_install() -> int:
     tk.Label(body, text="欢迎安装", font=FB, fg=DARK, bg=BG).pack(anchor="w")
     tk.Label(body, justify="left", anchor="w", wraplength=580, fg=MUTED, bg=BG, font=F,
              text="安装程序会把软件放到你选择的目录，并创建桌面与开始菜单快捷方式。\n"
-                  "首次启动时会自动检测显卡并配置 Python 环境（需联网，约几分钟）。"
+                  "安装完成后即可打开软件；训练等功能所需的运行环境可在软件内按需安装。"
              ).pack(anchor="w", pady=(6, 14))
 
     tk.Label(body, text="安装位置", font=FB, fg=DARK, bg=BG).pack(anchor="w")
@@ -641,7 +603,7 @@ def gui_install() -> int:
                    fg=DARK, bg=BG, activebackground=BG, selectcolor="white",
                    bd=0, highlightthickness=0).pack(anchor="w", pady=(4, 0))
 
-    tk.Label(body, text="程序文件约 1 MB；环境依赖与模型权重在首次启动时按需下载。",
+    tk.Label(body, text="程序文件约 1 MB；运行环境（约 6-8 GB）可在软件内按需下载安装。",
              fg=MUTED, bg=BG, font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(14, 0))
 
     foot = tk.Frame(page1, bg=BG)
@@ -654,9 +616,19 @@ def gui_install() -> int:
             messagebox.showwarning(APP_NAME, "请选择安装位置。", parent=root)
             return
         target = Path(raw)
-        if not desk_var.get() and not menu_var.get():
-            opts["no_shortcuts"] = True
+        opts["desk"] = bool(desk_var.get())
+        opts["menu"] = bool(menu_var.get())
+        opts["no_shortcuts"] = not (opts["desk"] or opts["menu"])
         opts["target_dir"] = target
+        try:
+            free_gb = shutil.disk_usage(target.anchor).free / 2 ** 30
+            if free_gb < 8 and not messagebox.askyesno(
+                    APP_NAME,
+                    "目标磁盘剩余 %.1f GB，后续按需安装运行环境通常需要 6-8 GB。仍要继续安装吗？" % free_gb,
+                    parent=root):
+                return
+        except Exception:
+            pass
         page1.pack_forget()
         page2.pack(fill="both", expand=True)
         run_worker()
@@ -685,7 +657,7 @@ def gui_install() -> int:
                  text="安装目录：%s\n\n以后双击桌面「YOLO 工坊」即可启动；"
                       "也可在「设置 → 应用 → 已安装的应用」中卸载。" % info["install_dir"]
                  ).pack(anchor="w", pady=(16, 10))
-        tk.Checkbutton(done_frame, text="立即启动 YOLO 工坊（首次启动会自动配置环境）",
+        tk.Checkbutton(done_frame, text="立即启动 YOLO 工坊",
                        variable=launch_var, font=F, fg=DARK, bg=BG, activebackground=BG,
                        selectcolor="white", bd=0, highlightthickness=0).pack(anchor="w")
 
@@ -702,17 +674,20 @@ def gui_install() -> int:
         done_frame.pack(fill="both", expand=True, padx=26)
 
     q_: queue.Queue = queue.Queue()
-    opts: dict = {"no_shortcuts": False, "target_dir": default_dir()}
+    opts: dict = {"no_shortcuts": False, "target_dir": default_dir(),
+                  "desk": True, "menu": True}
 
     def run_worker():
         target = opts["target_dir"]
         shortcuts = not opts["no_shortcuts"]
-        # both checkboxes off -> no shortcuts at all; one on -> create all (harmless extras)
+        desk = bool(opts.get("desk", True))
+        menu = bool(opts.get("menu", True))
 
         def work():
             try:
                 info = install(target, shortcuts,
-                               progress=lambda cur, tot, name: q_.put(("p", cur, tot, name)))
+                               progress=lambda cur, tot, name: q_.put(("p", cur, tot, name)),
+                               desk=desk, menu=menu)
                 q_.put(("ok", info))
             except Exception as exc:
                 log("install error %r" % exc)
@@ -754,6 +729,17 @@ def main() -> int:
     opts = parse_args(argv)
     log("argv=%r self=%s bundle=%s" % (argv, SELF, BUNDLE))
 
+    # The uninstaller is a self-copy of this EXE named 卸载YOLO工坊.exe.
+    # Double-clicking that file passes NO arguments, so without this it would
+    # open the *install* wizard instead of uninstalling. Recognise it by name
+    # and treat it as an uninstall request. Explicit --install still wins, and
+    # --uninstall from a shortcut / Control Panel is unchanged.
+    is_uninstaller_copy = SELF.name == UNINSTALL_EXE or (
+        SELF.stem.startswith("卸载") and not opts["install"])
+    if is_uninstaller_copy and not opts["uninstall"] and not opts["install"]:
+        log("uninstaller copy launched without args -> treating as uninstall")
+        opts["uninstall"] = True
+
     if opts["uninstall"]:
         close_splash()
         return uninstall(opts, argv)
@@ -762,12 +748,8 @@ def main() -> int:
         close_splash()
         return 0
 
-    installed_here = ((HERE / "bootstrap.py").is_file()
-                      and (HERE / "web" / "index.html").is_file())
-    if installed_here and not opts["install"]:
-        close_splash()
-        return launch()                       # software mode
-
+    # Installer is install/uninstall only. Launching the app is the job of the
+    # independent YOLO工坊.exe inside the install dir - never this EXE.
     if opts["silent"] or opts["install"]:
         close_splash()
         target = Path(opts["dir"]) if opts["dir"] else default_dir()
