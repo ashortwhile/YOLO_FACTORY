@@ -22,6 +22,7 @@ import base64
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -422,6 +423,66 @@ def install(inst: Path, shortcuts: bool = True, progress=None,
 
 
 # --------------------------------------------------------------------------- uninstall
+def kill_running_app(inst: Path) -> int:
+    """终止从安装目录运行的软件进程，释放对 EXE / .venv 文件的占用。
+
+    Windows 下文件被进程打开时无法删除；用户常常在软件仍开着时点卸载，
+    若不强杀进程，rmtree 必然 PermissionError(13) 而留下删不掉的空壳目录。
+    只杀本软件相关进程，绝不碰卸载器自身与系统进程。
+    """
+    if not IS_WIN:
+        return 0
+    root = str(inst.resolve())
+    script = f"""
+$root = {q(root)}
+$n = 0
+foreach ($p in (Get-CimInstance Win32_Process)) {{
+    $exe = [string]$p.ExecutablePath
+    $cl  = [string]$p.CommandLine
+    $name = [string]$p.Name
+    $launcher = $exe.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $name -like 'YOLO*.exe' -and
+                $name -notlike '*卸载*' -and
+                $name -notlike '*Uninstall*'
+    $py = ($name -eq 'python.exe' -or $name -eq 'pythonw.exe') -and
+          $cl.Contains($root) -and
+          ($cl.Contains('bootstrap.py') -or $cl.Contains('server.py') -or $cl.Contains('worker_'))
+    if (-not ($launcher -or $py)) {{ continue }}
+    try {{ Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $n++ }} catch {{ }}
+}}
+$n
+"""
+    rc, out = ps(script, timeout=30)
+    m = re.search(r"\d+", out or "")
+    killed = int(m.group()) if m else 0
+    log("kill_running_app rc=%s killed=%s out=%s" % (rc, killed, (out or "").strip()[:120]))
+    return killed
+
+
+def _remove_tree_parts(inst: Path) -> list[Path]:
+    """尽力逐个删除文件，返回仍删不掉的路径（被占用/权限不足）。"""
+    left: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(inst, topdown=False):
+        for name in filenames:
+            p = Path(dirpath) / name
+            try:
+                p.unlink()
+            except Exception as exc:
+                log("partial unlink failed %s: %r" % (p, exc))
+                left.append(p)
+        for name in dirnames:
+            p = Path(dirpath) / name
+            try:
+                p.rmdir()
+            except Exception:
+                pass
+    try:
+        inst.rmdir()
+    except Exception:
+        pass
+    return left
+
+
 def finish_uninstall(inst: Path, keep_data: bool, silent: bool) -> int:
     """Runs from a temp copy so the installed EXE is no longer locked."""
     info_file = inst / INFO_NAME if inst else None
@@ -461,9 +522,13 @@ def finish_uninstall(inst: Path, keep_data: bool, silent: bool) -> int:
             log("info read failed %r" % exc)
     reg_delete()
 
+    removed = True
     if inst and inst.is_dir():
         # Guard against a corrupted/edited install path: rmtree() is not undoable.
-        if not ((inst / "bootstrap.py").is_file() or (inst / INFO_NAME).is_file()):
+        # A half-uninstalled dir may have lost bootstrap.py / info.json but still
+        # carry the launcher EXE or server.py - those are equally valid markers.
+        markers = (EXE_NAME, "bootstrap.py", "server.py", INFO_NAME)
+        if not any((inst / m).is_file() for m in markers):
             log("refusing to delete %s: not a YOLO Studio install" % inst)
             return 1
         if keep_data:
@@ -479,18 +544,34 @@ def finish_uninstall(inst: Path, keep_data: bool, silent: bool) -> int:
                     log("user data kept at %s" % backup)
                 except Exception as exc:
                     log("data move failed %r" % exc)
-        for attempt in range(4):
+        # The running app (launcher + .venv server) locks EXE/DLL files. Kill it
+        # first, otherwise rmtree keeps hitting PermissionError(13) forever.
+        kill_running_app(inst)
+        time.sleep(1.0)
+        removed = False
+        for attempt in range(5):
             try:
                 shutil.rmtree(inst)
                 log("removed install dir %s" % inst)
+                removed = True
                 break
             except Exception as exc:
                 log("rmtree attempt %d: %r" % (attempt, exc))
                 time.sleep(0.8)
+        if not removed:
+            left = _remove_tree_parts(inst)
+            removed = not inst.exists()
+            log("partial removal: %d files left" % len(left))
     if not silent:
-        alert("YOLO 工坊已卸载。\n" + ("数据集、模型与训练结果已保留在用户数据目录。"
-                                    if keep_data else "程序文件已全部删除。"))
-    return 0
+        if removed:
+            alert("YOLO 工坊已卸载。\n" + ("数据集、模型与训练结果已保留在用户数据目录。"
+                                        if keep_data else "程序文件已全部删除。"))
+        else:
+            alert("卸载未完成：程序仍在运行或部分文件被占用，安装目录未能删除。\n\n"
+                  "请先关闭 YOLO 工坊，然后手动删除：\n%s\n\n"
+                  "也可重启电脑后再运行卸载程序。" % (inst or "安装目录"),
+                  kind="error")
+    return 0 if removed else 2
 
 
 def uninstall(opts: dict, argv: list[str]) -> int:
@@ -512,8 +593,9 @@ def uninstall(opts: dict, argv: list[str]) -> int:
         return finish_uninstall(inst, keep, opts["silent"])
 
     # Running inside the install dir: relaunch from a temp copy so the EXE is unlocked.
+    # Unique name avoids colliding with a stale/locked copy from a previous run.
     try:
-        tmp = Path(tempfile.gettempdir()) / "YOLOStudioUninstall.exe"
+        tmp = Path(tempfile.gettempdir()) / ("YOLOStudioUninstall_%d.exe" % os.getpid())
         shutil.copy2(SELF, tmp)
         child = [str(tmp), "--uninstall", "--from-temp", "--target=%s" % inst]
         if keep:
