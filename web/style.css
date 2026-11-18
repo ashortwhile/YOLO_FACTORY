@@ -277,6 +277,18 @@ details.adv[open] summary{margin-bottom:12px}
 .runtime-head .hint{margin:0;color:var(--muted);font-size:12.5px;line-height:1.6}
 .runtime-head .btn{flex:none;min-width:132px}
 #setupLog{margin-top:14px;max-height:280px;overflow:auto}
+/* download progress (pip wheel downloads) */
+.dl-progress{margin-top:14px;padding:12px 14px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);background:var(--primary-soft)}
+.dl-progress-top{display:flex;justify-content:space-between;align-items:baseline;
+  font-weight:700;color:var(--primary-dark);font-size:13px}
+.dl-progress-top #setupProgPct,.dl-progress-top #hwProgPct{font-variant-numeric:tabular-nums}
+.dl-progress-track{height:8px;border-radius:6px;background:#dfe4f6;margin:9px 0 6px;overflow:hidden}
+.dl-progress-fill{height:100%;width:0%;border-radius:6px;
+  background:linear-gradient(90deg,var(--primary),var(--primary-2));
+  transition:width .3s ease}
+.dl-progress-sub{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:720px){
   .runtime-head{flex-direction:column;align-items:stretch}
   .runtime-head .btn{width:100%}

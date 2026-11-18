@@ -331,21 +331,15 @@ def training_advice(backend: str, vram_mb: int) -> dict:
 
 
 def build_device_options(gpus: list[dict], torch_info: dict, recommended: str, device: str) -> list[dict]:
-    """Device dropdown entries; disabled ones are shown but explained."""
-    opts = [{"value": "auto", "label": f"自动（当前推荐：{recommended} / {device}）", "ready": True}]
+    """Device dropdown entries — only clean, usable choices, no explanatory text."""
+    opts = [{"value": "auto", "label": "自动", "ready": True}]
     if recommended != "cpu":
-        opts.append({"value": device, "label": f"{recommended.upper()} 加速（{device}）",
-                     "ready": True})
-    opts.append({"value": "cpu", "label": "CPU（必定可用，速度较慢）", "ready": True})
-    # explicit alternates
-    for val, label, ok in [
-        ("0", "NVIDIA CUDA / AMD ROCm (cuda:0)", bool(torch_info.get("cuda"))),
-        ("xpu:0", "Intel XPU (xpu:0)", bool(torch_info.get("xpu"))),
-        ("mps", "Apple MPS", bool(torch_info.get("mps"))),
-        ("dml", "Windows DirectML（实验性，建议仅推理）", bool(torch_info.get("directml"))),
-    ]:
-        if not any(o["value"] == val for o in opts):
-            opts.append({"value": val, "label": label, "ready": ok})
+        opts.append({"value": device, "label": f"{recommended.upper()} 加速", "ready": True})
+    opts.append({"value": "cpu", "label": "CPU", "ready": True})
+    if torch_info.get("cuda") and not any(o["value"] == "0" for o in opts):
+        opts.append({"value": "0", "label": "NVIDIA CUDA", "ready": True})
+    if torch_info.get("xpu") and not any(o["value"] == "xpu:0" for o in opts):
+        opts.append({"value": "xpu:0", "label": "Intel XPU", "ready": True})
     return opts
 
 

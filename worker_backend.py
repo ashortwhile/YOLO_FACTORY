@@ -23,6 +23,33 @@ MIRRORS = {
 PREFIX = "__YSTUDIO__"
 
 
+def _with_progress(cmd: list[str]) -> list[str]:
+    """Ask pip to emit byte progress so the UI can draw a real progress bar."""
+    if ("-m" in cmd and "pip" in cmd and "install" in cmd
+            and "--progress-bar" not in cmd):
+        # insert right after "install"
+        i = cmd.index("install") + 1
+        return cmd[:i] + ["--progress-bar", "on"] + cmd[i:]
+    return cmd
+
+
+def _backend_ready(backend: str, info: dict) -> bool:
+    """Does the installed torch already satisfy the requested backend?"""
+    if not info.get("version"):
+        return False
+    checks = {
+        "xpu": bool(info.get("xpu")),
+        "cuda": bool(info.get("cuda")),
+        "rocm": bool(info.get("hip")),
+        "mps": bool(info.get("mps")),
+        "dml": bool(info.get("directml")),
+    }
+    if backend in checks:
+        return checks[backend]
+    # CPU: any working torch with no other accelerator is fine.
+    return "cpu" in str(info.get("version", "")).lower() or not info.get("cuda")
+
+
 def emit(obj: dict) -> None:
     print(PREFIX + json.dumps(obj, ensure_ascii=False), flush=True)
 
@@ -32,6 +59,7 @@ def log(msg: str) -> None:
 
 
 def run(cmd: list[str], py: str) -> bool:
+    cmd = _with_progress(cmd)
     log("\n$ " + " ".join(cmd))
     try:
         # Strip injected sitecustomize shims: pip must be able to unlink files
@@ -116,10 +144,32 @@ def main() -> int:
             encoding="utf-8")
         return 1
 
+    # ---- no-op guard: already running the requested backend? ----
+    # Never uninstall a working build just to reinstall the identical one —
+    # that wasted minutes re-downloading 700 MB and, if the reinstall failed,
+    # destroyed a perfectly good XPU env. Verify first, skip if satisfied.
+    current = hardware.probe_torch(py)
+    if _backend_ready(backend, current):
+        log(f"Already on {backend} (torch {current.get('version')}, "
+            f"torchvision {current.get('torchvision')}) -> nothing to install.")
+        result["ok"] = True
+        result["verified"] = True
+        result["torch"] = current.get("version", "")
+        result["skipped"] = True
+        emit({"type": "stage", "message": f"{backend} 已就绪，无需重装"})
+        emit({"type": "done", "result": result})
+        Path(job["result_path"]).write_text(
+            json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        return 0
+
     emit({"type": "stage", "message": f"installing torch for {backend}"})
 
     # Replace only torch / torchvision, keep the rest of the venv intact.
-    # Try domestic mirror then official index for the same variant.
+    # Snapshot the current build first so a failed install can restore it
+    # instead of leaving the user stranded on a broken / CPU-only environment.
+    prev_version = current.get("version") or ""
+    prev_tv = current.get("torchvision") or ""
     run([py, "-m", "pip", "uninstall", "-y", "torch", "torchvision"], py)
     ok = False
     for idx in indexes:
@@ -131,13 +181,36 @@ def main() -> int:
         log("  [warn] that index failed, trying the next one...")
 
     if not ok:
-        log("Install failed. Restoring a working CPU torch so the environment stays usable...")
-        emit({"type": "warn", "message": "install failed, restoring CPU torch"})
-        for idx in hardware.torch_indexes("cpu"):
-            if run([py, "-m", "pip", "install", "torch", "torchvision",
-                    "--index-url", idx, "--retries", "2"], py):
-                break
-        result["error"] = "torch install failed; rolled back to CPU"
+        restored = False
+        if prev_version:
+            # Try to put back exactly what was there before we uninstalled.
+            # Infer its variant from the version tag (+xpu / +cuNNN / plain cpu).
+            log(f"Install failed. Restoring previous torch {prev_version} ...")
+            emit({"type": "warn", "message": "安装失败，正在恢复原有 PyTorch"})
+            low = prev_version.lower()
+            if "+xpu" in low:
+                prev_variant = "xpu"
+            elif "+cu" in low:
+                prev_variant = low.split("+", 1)[1].split(".", 1)[0]
+            else:
+                prev_variant = "cpu"
+            for idx in hardware.torch_indexes(prev_variant):
+                spec = ["torch==" + prev_version]
+                if prev_tv:
+                    spec.append("torchvision==" + prev_tv)
+                if run([py, "-m", "pip", "install", *spec,
+                        "--index-url", idx, "--retries", "2"], py):
+                    restored = True
+                    break
+        if not restored:
+            log("Restore failed / no previous build. Falling back to CPU torch.")
+            emit({"type": "warn", "message": "install failed, restoring CPU torch"})
+            for idx in hardware.torch_indexes("cpu"):
+                if run([py, "-m", "pip", "install", "torch", "torchvision",
+                        "--index-url", idx, "--retries", "2"], py):
+                    break
+        result["error"] = ("torch install failed; restored previous build" if restored
+                           else "torch install failed; rolled back to CPU")
         result["ok"] = False
     else:
         if backend in ("xpu", "rocm", "cuda", "mps"):
