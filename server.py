@@ -900,6 +900,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "app": "yolo-studio"})
             if path == "/" or path == "/index.html":
                 return self._static("index.html")
+            if path == "/favicon.ico":
+                return self._static("favicon.ico")
             if path.startswith("/static/"):
                 return self._static(path[len("/static/"):])
             if path == "/api/status":

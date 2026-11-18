@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLO 工坊 - 训练一体式软件</title>
+<title>YOLO 工坊</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="logo">Y</span><div><b>YOLO 工坊</b><small>标注 · 训练 · 推理 一体式</small></div></div>
+  <div class="brand"><span class="logo">Y</span><div><b>YOLO 工坊</b></div></div>
   <div class="top-right">
     <span id="hwBadge" class="badge badge-muted">检测硬件中...</span>
     <span id="taskBadge" class="badge badge-muted">空闲</span>
-    <button class="btn btn-ghost" id="btnHelpTop" title="使用说明">帮助</button>
     <button class="btn btn-ghost" id="btnQuit" title="关闭服务并退出">退出软件</button>
   </div>
 </header>
@@ -28,7 +28,6 @@
   <a class="nav-item" data-view="runs"><i class="ico">▥</i>训练结果</a>
   <div class="nav-group-title">系统</div>
   <a class="nav-item" data-view="env"><i class="ico">⚙</i>环境与显卡</a>
-  <a class="nav-item" data-view="help"><i class="ico">?</i>使用说明</a>
   <div class="side-foot"><span id="sideVersion"></span></div>
 </nav>
 
@@ -197,6 +196,11 @@
         <p class="hint" id="runtimeDesc"></p></div>
       <button class="btn btn-primary" id="btnSetupEnv">安装运行环境</button>
     </div>
+    <div class="dl-progress" id="setupProgress" style="display:none">
+      <div class="dl-progress-top"><span id="setupProgLabel">下载中</span><span id="setupProgPct">0%</span></div>
+      <div class="dl-progress-track"><div class="dl-progress-fill" id="setupProgFill"></div></div>
+      <div class="dl-progress-sub" id="setupProgSub"></div>
+    </div>
     <pre class="logbox small" id="setupLog" style="display:none"></pre>
   </div>
   <div class="row-2">
@@ -206,7 +210,11 @@
       <label>目标后端<select id="hwBackend"></select></label>
       <div class="btn-row"><button class="btn btn-primary" id="btnSwitchBackend">一键启用加速</button>
         <button class="btn" id="btnBackToCpu">恢复 CPU 版</button></div>
-      <div class="warn" id="hwWarn"></div>
+      <div class="dl-progress" id="hwProgress" style="display:none">
+        <div class="dl-progress-top"><span id="hwProgLabel">下载中</span><span id="hwProgPct">0%</span></div>
+        <div class="dl-progress-track"><div class="dl-progress-fill" id="hwProgFill"></div></div>
+        <div class="dl-progress-sub" id="hwProgSub"></div>
+      </div>
       <pre class="logbox small" id="hwLog">等待操作...</pre>
     </div>
     <div class="card"><h3>运行时</h3><div id="envRuntime" class="kv-list"></div>
@@ -226,29 +234,6 @@
 </section>
 
 <!-- ============ 帮助 ============ -->
-<section class="view" id="view-help">
-  <div class="page-head"><div><h1>使用说明</h1></div></div>
-  <div class="row-2">
-    <div class="card"><h3>第一次使用</h3>
-      <ol class="steps"><li>启动软件后会自动探测显卡、创建独立虚拟环境，并下载匹配的 PyTorch / Ultralytics 与默认权重。</li>
-      <li>「数据集」页新建数据集，或挂载已有的 YOLO 目录。</li>
-      <li>「打标签」页人工画框；点「AI 预标注」可用已有权重起草，再人工修正。</li>
-      <li>「训练」页选模型与设备，开始后实时显示日志和曲线。</li></ol>
-      <div class="divider"></div><h3>模型与数据</h3>
-      <ol class="steps"><li>「模型管理」的权重清单实时取自官方仓库，点「刷新在线模型」可拉取最新版本。</li>
-      <li>自行下载的 .pt / .onnx 权重，用「导入本地权重」选择文件即可加入模型库。</li>
-      <li>离线时自动回退到内置模型列表，不影响使用。</li></ol>
-    </div>
-    <div class="card"><h3>标注快捷键</h3>
-      <table class="table"><tr><td>A / D 或 ← / →</td><td>上一张 / 下一张（有选中框时方向键微调位置）</td></tr>
-      <tr><td>鼠标拖拽</td><td>画新框</td></tr><tr><td>点击框 / 拖动</td><td>选中 / 移动</td></tr>
-      <tr><td>拖右下角</td><td>缩放框</td></tr><tr><td>1 - 9</td><td>切换当前类别 / 改选中框类别</td></tr>
-      <tr><td>Delete / Backspace</td><td>删除选中框</td></tr><tr><td>Ctrl + S</td><td>保存</td></tr>
-      <tr><td>Esc</td><td>取消选择</td></tr></table>
-    </div>
-  </div>
-</section>
-
 </main>
 </div>
 

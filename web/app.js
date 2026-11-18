@@ -85,7 +85,6 @@ function go(view) {
 }
 document.querySelectorAll('.nav-item').forEach(n => n.onclick = () => go(n.dataset.view));
 document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go));
-$('btnHelpTop').onclick = () => go('help');
 let statusTimer = null;
 function stopBackgroundPolling() {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
@@ -198,8 +197,7 @@ function fillModelSelectors() {
   });
 }
 function deviceItems() {
-  const opts = (S.hw && S.hw.device_options) || [{ value: 'auto', label: '自动' }, { value: 'cpu', label: 'CPU' }];
-  return opts.map(o => ({ value: o.value, label: o.label + (o.ready === false ? '（未启用）' : '') }));
+  return (S.hw && S.hw.device_options) || [{ value: 'auto', label: '自动' }, { value: 'cpu', label: 'CPU' }];
 }
 function fillDeviceSelectors() {
   ['trDevice', 'prDevice'].forEach(id => {
@@ -235,7 +233,7 @@ async function renderHome() {
       ['推荐后端', (h.recommended || {}).backend + ' / ' + (h.recommended || {}).device],
       ['PyTorch', ((h.torch || {}).version || '-')],
       ['Ultralytics', ((h.torch || {}).ultralytics || '-')],
-      ['状态', h.ready ? '加速已就绪' : '未启用显卡加速（当前 CPU）'],
+      ['状态', h.ready ? '已就绪' : 'CPU'],
     ];
     $('homeHardware').innerHTML = rows.map(r =>
       `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join('') +
@@ -778,7 +776,7 @@ $('lbAutoLabel').onclick = () => {
   if (!L.ds) return toast('请先选择数据集', true);
   const models = modelItems().map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
   const cls = L.classes.map((c, i) => `<option value="${i}" ${i === L.activeCls ? 'selected' : ''}>${esc(c)}</option>`).join('');
-  showModal('AI 预标注（起草，仍需人工确认）', `
+  showModal('AI 预标注', `
     <p class="hint">用现有权重先跑一遍自动出框，人再修改。若使用 COCO 官方权重，类别与你的自定义类别不匹配，所有框会被设为下面指定的默认类别。</p>
     <label>模型<select id="alModel">${models}</select></label>
     <label>范围<select id="alScope"><option value="unlabeled">仅未标注图片</option><option value="current">仅当前图片</option><option value="all">全部图片（覆盖已有框）</option></select></label>
@@ -902,6 +900,58 @@ function appendLog(el, text) {
   if (!el) return;
   el.textContent = (el.textContent === '等待训练启动...' || el.textContent === '等待操作...' ? '' : el.textContent) + text;
   el.scrollTop = el.scrollHeight;
+}
+
+/* ---- pip download progress ----
+   pip writes lines like " 123.4/764.6 MB 5.0 MB/s 0:01:23" to the task log.
+   Text arrives in chunks via onLog; keep a small tail buffer so a number split
+   across two chunks still parses. \r is treated as a line break. */
+const DL_BUF = new WeakMap();
+function updateDownloadProgress(box, text) {
+  if (!box) return;
+  const prev = DL_BUF.get(box) || '';
+  const raw = (prev + text).replace(/\r/g, '\n');
+  const lines = raw.split('\n');
+  DL_BUF.set(box, lines.length ? lines[lines.length - 1] : '');
+  // Scan newest lines first for a "done/total UNIT" pattern.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/([\d.]+)\s*\/\s*([\d.]+)\s*(kB|MB|GB)\b/i);
+    if (!m) continue;
+    const done = parseFloat(m[1]), total = parseFloat(m[2]), unit = m[3];
+    if (!(total > 0)) continue;
+    const factor = unit.toLowerCase() === 'gb' ? 1024 : unit.toLowerCase() === 'kb' ? 1 / 1024 : 1;
+    const pct = Math.max(0, Math.min(100, Math.round(done / total * 100)));
+    const filled = $(box.pctId), bar = $(box.fillId), sub = $(box.subId), lab = $(box.labelId);
+    if (filled) filled.textContent = pct + '%';
+    if (bar) bar.style.width = pct + '%';
+    if (sub) sub.textContent = m[0].trim() + (factor < 1 ? '' : '');
+    if (lab) lab.textContent = box.label;
+    box.el.style.display = '';
+    if (pct >= 100) box.done = true;
+    return;
+  }
+}
+function showProgress(box) {
+  if (!box || !box.el) return;
+  box.el.style.display = '';
+  const f = $(box.fillId); if (f) f.style.width = '0%';
+  const p = $(box.pctId); if (p) p.textContent = '0%';
+  const s = $(box.subId); if (s) s.textContent = '';
+  const l = $(box.labelId); if (l) l.textContent = box.label;
+  box.done = false;
+}
+function hideProgress(box) { if (box && box.el) box.el.style.display = 'none'; }
+const SETUP_PROGRESS = {
+  el: null, labelId: 'setupProgLabel', pctId: 'setupProgPct',
+  fillId: 'setupProgFill', subId: 'setupProgSub', label: '下载运行环境'
+};
+const HW_PROGRESS = {
+  el: null, labelId: 'hwProgLabel', pctId: 'hwProgPct',
+  fillId: 'hwProgFill', subId: 'hwProgSub', label: '下载加速组件'
+};
+function initProgress() {
+  SETUP_PROGRESS.el = $('setupProgress');
+  HW_PROGRESS.el = $('hwProgress');
 }
 
 /* ---------------- train ---------------- */
@@ -1085,11 +1135,10 @@ $('btnValidate').onclick = async () => {
 $('btnExport').onclick = () => {
   const p = commonParams({ format: 'onnx' }); delete p.file;
   showModal('导出模型', `<label>格式<select id="exFormat">
-      <option value="onnx">ONNX（通用）</option>
-      <option value="openvino">OpenVINO（Intel GPU / CPU 推荐）</option>
+      <option value="onnx">ONNX</option>
+      <option value="openvino">OpenVINO</option>
       <option value="torchscript">TorchScript</option>
-      <option value="tflite">TFLite</option></select></label>
-    <p class="hint small">部分格式需要额外依赖；失败时日志会给出安装命令。</p>`, async () => {
+      <option value="tflite">TFLite</option></select></label>`, async () => {
     p.format = $('exFormat').value;
     await runSimple('export', p, '导出', async (res) => {
       $('prLog').textContent += '\n\n导出文件: ' + (res.path || '-');
@@ -1161,6 +1210,7 @@ async function setupEnv() {
   btn.disabled = true;
   btn.textContent = '安装中…';
   box.style.display = ''; box.textContent = '';
+  showProgress(SETUP_PROGRESS);
   try {
     const t = await api('/api/task/start', {
       type: 'setup_env',
@@ -1168,8 +1218,13 @@ async function setupEnv() {
       label: '安装运行环境'
     });
     toast('运行环境安装已启动，可切换到其他页面');
-    const st = await watchTask(t.id, { onLog: txt => appendLog(box, txt) });
+    const st = await watchTask(t.id, { onLog: txt => {
+      appendLog(box, txt);
+      updateDownloadProgress(SETUP_PROGRESS, txt);
+    } });
     if (st.status === 'done') {
+      const f = $(SETUP_PROGRESS.fillId); if (f) f.style.width = '100%';
+      const p = $(SETUP_PROGRESS.pctId); if (p) p.textContent = '完成';
       toast('运行环境安装完成，所有功能已可用');
     } else {
       toast('安装失败：' + (st.error || '请查看日志'), true);
@@ -1217,17 +1272,12 @@ async function renderEnv() {
     $('hwReadyBadge').textContent = h.ready ? '加速已就绪' : '未启用加速';
     $('hwReadyBadge').className = 'badge ' + (h.ready ? 'badge-ok' : 'badge-warn');
     const backends = [
-      { value: 'cpu', label: 'CPU（恢复/回退）' },
+      { value: 'cpu', label: 'CPU' },
       { value: 'cuda', label: 'NVIDIA CUDA' },
       { value: 'xpu', label: 'Intel XPU' },
-      { value: 'rocm', label: 'AMD ROCm（Windows 需 HIP SDK）' },
-      { value: 'mps', label: 'Apple MPS' },
-      { value: 'dml', label: 'DirectML（实验性）' },
+      { value: 'dml', label: 'DirectML' },
     ];
     fillSelect($('hwBackend'), backends, h.recommended.backend);
-    $('hwWarn').className = 'warn' + (h.ready ? '' : ' show');
-    $('hwWarn').textContent = h.ready ? '' :
-      '运行环境尚未安装。请在上方「运行环境」卡片点击安装，按显卡自动匹配；也可在下方手动切换后端（需下载数百 MB），失败会自动回退 CPU。';
   } catch (e) { $('hwDetail').innerHTML = '<div class="hint">' + esc(e.message) + '</div>'; }
   await renderEnvRest();
 }
@@ -1329,16 +1379,30 @@ $('btnSaveCfg').onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 function switchBackend(backend) {
-  const warn = backend === 'cpu' ? '将重新安装 CPU 版 PyTorch。' :
-    '将替换当前 PyTorch 为 ' + backend.toUpperCase() + ' 版本，并升级 ultralytics。需要下载依赖，可能耗时数分钟。';
-  showModal('切换加速后端', `<p class="hint">${esc(warn)} 失败时会自动回退到 CPU，不影响已有数据。</p>`, async () => {
-    $('hwLog').textContent = '';
+  const label = (backend || '').toUpperCase();
+  showModal(backend === 'cpu' ? '恢复 CPU 版' : '启用 ' + label + ' 加速',
+    `<p class="hint">${esc(backend === 'cpu' ? '切换到 CPU 版 PyTorch。' : '切换到 ' + label + ' 版 PyTorch。')}</p>`, async () => {
+    const hwLog = $('hwLog');
+    hwLog.textContent = '';
+    showProgress(HW_PROGRESS);
     try {
       const t = await api('/api/task/start', { type: 'backend', label: '切换后端 ' + backend,
         params: { backend } });
       toast('后端切换任务已启动，请稍候');
-      const st = await watchTask(t.id, { onLog: txt => appendLog($('hwLog'), txt) });
-      toast(st.status === 'done' ? '后端已切换' : '切换未完成，请查看日志', st.status !== 'done');
+      const st = await watchTask(t.id, { onLog: txt => {
+        appendLog(hwLog, txt);
+        updateDownloadProgress(HW_PROGRESS, txt);
+      } });
+      if (st.status === 'done' && st.result && st.result.skipped) {
+        hideProgress(HW_PROGRESS);
+        toast(label + ' 已就绪，无需重装');
+      } else if (st.status === 'done') {
+        const f = $(HW_PROGRESS.fillId); if (f) f.style.width = '100%';
+        const p = $(HW_PROGRESS.pctId); if (p) p.textContent = '完成';
+        toast('后端已切换');
+      } else {
+        toast('切换未完成，请查看日志', true);
+      }
       setTimeout(renderEnv, 800);
     } catch (e) { toast(e.message, true); }
   });
@@ -1351,13 +1415,14 @@ $('btnBackToCpu').onclick = () => switchBackend('cpu');
   // go('home') used to fire an un-awaited renderHome() before loadCore() filled
   // S.datasets, causing duplicate /api/status calls and a zeroed-stats flash.
   // The home view is already the active one in the markup.
+  initProgress();
   S.view = 'home';
   await loadCore();
   await renderHome();
   loadOnlineModels(false);   // populated async; never blocks first paint
   resumeTrainWatch();
   const deepView = new URLSearchParams(location.search).get('view');
-  if (deepView && ['datasets','label','train','predict','runs','env','help'].includes(deepView)) go(deepView);
+  if (deepView && ['datasets','label','train','predict','runs','env'].includes(deepView)) go(deepView);
   statusTimer = setInterval(async () => {
     if (document.hidden) return;
     try {
